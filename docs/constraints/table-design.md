@@ -12,8 +12,11 @@ apart from what the group shares, and every read is along a key.
 - Under GROUP: MEMBER#<id> for each member, PLAYLIST#<id> for what a
   playlist was found to be, and RUN for the one run in progress.
 - Under USER#<id>: PROFILE (name and settings), TOKEN (Spotify tokens),
-  PLAN (the last run's plan and result) and MEMORY (what the library
-  held after the last run, and what the person removed).
+  PLAN (the last run's plan and the person's last apply) and MEMORY
+  (what the library held after the last run, what the person removed,
+  whether they have applied once, and playlists left to finish).
+- TOKEN, PLAN and MEMORY are written only while PROFILE exists, in one
+  transaction with a check on it, so nothing comes back after leaving.
 - The user id in a key comes from a verified session or from Spotify's
   answer at sign-in, never from a request body.
 - One store module is the only code that reads or writes the table.
@@ -21,8 +24,9 @@ apart from what the group shares, and every read is along a key.
 - Every read is strongly consistent.
 - Only one run holds RUN at a time, taken with a conditional write.
 - A new kind of item gets its own sort key, added in the key module.
-- Leaving deletes every item under the person's USER# key and their
-  MEMBER# item.
+- Leaving deletes PROFILE first, then every item under the person's
+  USER# key, their MEMBER# item, and the PLAYLIST# items for playlists
+  they own.
 
 ## Do not
 

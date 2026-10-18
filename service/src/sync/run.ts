@@ -1,8 +1,9 @@
 // One run for the whole group: read every member's library, find what each
 // playlist is, then plan for each person and apply where they said to
 // (sync-safety.md).
-import type { LastRun } from "../../../shared/page-api";
-import type { UserId } from "../ids";
+import type { z } from "zod";
+import type { Plan } from "../../../shared/page-api";
+import type { jobSchema } from "../jobs";
 import { errorClass, type Logger } from "../log";
 import { RateLimited, type SpotifyClient } from "../spotify/client";
 import {
@@ -11,23 +12,25 @@ import {
   type PlaylistSummary,
 } from "../spotify/schemas";
 import type { Member, RunState, Store } from "../store/store";
-import { createFollowedReader, analyseTracks, identifyByName } from "./analyse";
-import { applyActions } from "./apply";
-import { makePlan, type GroupPlaylist, type Library } from "./plan";
+import { analyseTracks, createFollowedReader, identifyByName } from "./analyse";
+import { applyActions, type Change } from "./apply";
+import {
+  albumKey,
+  approvedOnly,
+  makePlan,
+  type Actions,
+  type GroupPlaylist,
+  type Library,
+  type Memory,
+} from "./plan";
 import { isWholeAlbum, type Verdict } from "./verdict";
 
-export interface Job {
-  kind: LastRun["job"];
-  // Who asked, for an apply or a check. Nobody, for the schedule.
-  requestedBy: UserId | null;
-  runId: string;
-  // How many times this run has carried on in a fresh invocation.
-  hop: number;
-}
+export type Job = z.infer<typeof jobSchema>;
+type Carried = NonNullable<Job["carried"]>;
 
 export type RunResult =
   | { state: "finished" }
-  | { state: "continue" }
+  | { state: "continue"; carried: Carried | null }
   | { state: "paused"; retryAt: Date }
   | { state: "busy" }
   | { state: "stopped" };
@@ -43,22 +46,20 @@ export interface RunDeps {
 
 // A run holds the group's lock this long before another may take it.
 export const lockSeconds = 16 * 60;
-// Time kept back to save progress and hand over to the next invocation.
-export const reserveMs = 90_000;
-// Each person's apply is started only with this much time left.
-export const applyReserveMs = 240_000;
+// Time kept back before reading another playlist, so the run can save what
+// it found and hand over to the next invocation.
+export const reserveMs = 180_000;
+// Time kept back before each change an apply makes.
+export const stepReserveMs = 200_000;
 export const maxHops = 12;
-
-const nothingApplied = (at: Date): NonNullable<LastRun["applied"]> => ({
-  at: at.toISOString(),
-  saved: 0,
-  followed: 0,
-  created: [],
-  failed: 0,
-});
 
 class OutOfTime extends Error {
   override name = "OutOfTime";
+  readonly carried: Carried | null;
+  constructor(carried: Carried | null = null) {
+    super("The run ran out of time.");
+    this.carried = carried;
+  }
 }
 
 export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
@@ -86,12 +87,10 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
   }
   log.info(job.hop === 0 ? "run-started" : "run-continued", fields);
   try {
-    const result = await work(job, deps);
-    if (result.state === "finished") {
-      await store.endRun(job.runId);
-      log.info("run-finished", fields);
-    }
-    return result;
+    await work(job, deps);
+    await store.endRun(job.runId);
+    log.info("run-finished", fields);
+    return { state: "finished" };
   } catch (error) {
     if (error instanceof RateLimited) {
       const retryAt = new Date(now().getTime() + error.retryAfter * 1000);
@@ -99,7 +98,9 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
       log.warn("run-paused", { ...fields, retryAfter: error.retryAfter });
       return { state: "paused", retryAt };
     }
-    if (error instanceof OutOfTime) return { state: "continue" };
+    if (error instanceof OutOfTime) {
+      return { state: "continue", carried: error.carried };
+    }
     await store.endRun(job.runId);
     log.error("run-failed", { ...fields, errorClass: errorClass(error) });
     throw error;
@@ -133,13 +134,15 @@ async function readLibrary(
   return { userId: member.id, playlists, saved };
 }
 
-async function work(job: Job, deps: RunDeps): Promise<RunResult> {
-  const { store, log, now, remainingMs } = deps;
+async function work(job: Job, deps: RunDeps): Promise<void> {
+  const { store, log, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind };
 
   // 1. Every member's library, read with their own token.
+  const members = await store.listMembers();
+  const memberIds = new Set<string>(members.map((member) => member.id));
   const readers: Reader[] = [];
-  for (const member of await store.listMembers()) {
+  for (const member of members) {
     const client = await deps.clientFor(member);
     if (client === undefined) continue;
     const library = await readLibrary(member, client);
@@ -153,7 +156,9 @@ async function work(job: Job, deps: RunDeps): Promise<RunResult> {
   }
 
   // 2. What each playlist is. A member's own playlist is read with its
-  //    owner's token. One owned outside the group is read by name.
+  //    owner's token. One owned outside the group is read by name. One
+  //    whose owner is a member that spotimy cannot reach this run waits,
+  //    since a guess by name would be kept until the playlist changes.
   const verdicts = await store.getVerdicts();
   const pending: Verdict[] = [];
   const flush = async () => {
@@ -174,8 +179,9 @@ async function work(job: Job, deps: RunDeps): Promise<RunResult> {
         seen.add(playlist.id);
         if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
           continue;
-        if (remainingMs() < reserveMs) throw new OutOfTime();
         const owner = owners.get(playlist.owner.id);
+        if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
+        if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
         const verdict =
           owner === undefined
             ? ((await followedReader(reader.client, playlist)) ??
@@ -184,7 +190,7 @@ async function work(job: Job, deps: RunDeps): Promise<RunResult> {
         verdicts.set(playlist.id, verdict);
         pending.push(verdict);
         read += 1;
-        if (pending.length >= 25) await flush();
+        if (pending.length >= 10) await flush();
       }
     }
   } finally {
@@ -214,104 +220,209 @@ async function work(job: Job, deps: RunDeps): Promise<RunResult> {
   );
 
   // 4. A plan for each person, applied where they said to.
-  for (const { member, client, library } of readers) {
-    const profile = await store.getProfile(member.id);
-    if (profile === undefined) continue;
-    const planned = makePlan({
-      library,
-      settings: profile.settings,
-      verdicts,
-      group,
-      memory: await store.getMemory(member.id),
-    });
-    const { plan, actions } = planned;
-    log.info("plan-made", {
-      ...fields,
-      userId: member.id,
-      save: plan.save.length,
-      follow: plan.follow.length,
-      create: plan.create.length,
-    });
-    const applying =
-      (job.kind === "apply" && job.requestedBy === member.id) ||
-      (job.kind === "schedule" && profile.settings.autoApply && !plan.first);
-    const hasWork =
-      actions.save.length + actions.follow.length + actions.create.length > 0;
-    const memory = planned.memory;
-    if (applying && hasWork) {
-      if (remainingMs() < applyReserveMs) throw new OutOfTime();
-      const outcome = await applyActions({
-        client,
-        userId: member.id,
-        actions,
-        privatePlaylists: profile.settings.privatePlaylists,
-        log,
-      });
-      memory.savedAlbums.push(...outcome.saved);
-      memory.playlists.push(
-        ...outcome.followed,
-        ...outcome.created.map((created) => created.playlistId),
-      );
-      await store.putVerdicts(
-        outcome.created.map((created) => created.verdict),
-      );
-      for (const created of outcome.created) {
-        verdicts.set(created.playlistId, created.verdict);
-        // Later members in this run follow it rather than making their own.
-        if (
-          !profile.settings.privatePlaylists &&
-          created.verdict.albumId !== null
-        ) {
-          group.push({
-            playlistId: created.playlistId,
-            ownerId: member.id,
-            ownerName: member.name,
-            albumId: created.verdict.albumId,
-            albumLabel: created.verdict.albumLabel ?? created.name,
-            name: created.name,
-          });
-        }
-      }
-      const applied: LastRun["applied"] = {
-        at: now().toISOString(),
-        saved: outcome.saved.length,
-        followed: outcome.followed.length,
-        created: outcome.created.map(({ name, year }) => ({ name, year })),
-        failed: outcome.failed,
-      };
-      log.info("changes-applied", {
-        ...fields,
-        userId: member.id,
-        save: outcome.saved.length,
-        follow: outcome.followed.length,
-        create: outcome.created.length,
-        failed: outcome.failed,
-      });
-      await store.putMemory(member.id, memory);
-      await store.putLastRun(member.id, {
+  for (const reader of readers) {
+    await planFor(reader, group, verdicts, job, deps);
+  }
+}
+
+async function planFor(
+  { member, client, library }: Reader,
+  group: GroupPlaylist[],
+  verdicts: Map<string, Verdict>,
+  job: Job,
+  deps: RunDeps,
+): Promise<void> {
+  const { store, log, now, remainingMs } = deps;
+  const fields = { runId: job.runId, job: job.kind, userId: member.id };
+  const profile = await store.getProfile(member.id);
+  if (profile === undefined) return;
+  const previous = await store.getLastRun(member.id);
+  const planned = makePlan({
+    library,
+    settings: profile.settings,
+    verdicts,
+    group,
+    memory: await store.getMemory(member.id),
+  });
+  const { plan, memory } = planned;
+  log.info("plan-made", {
+    ...fields,
+    save: plan.save.length,
+    follow: plan.follow.length,
+    create: plan.create.length,
+  });
+
+  // An apply does what the plan the person approved said, and no more. One
+  // that names a plan since replaced does nothing. The schedule applies only
+  // for someone who turned that on and has applied once themselves.
+  const asked = job.kind === "apply" && job.requestedBy === member.id;
+  const approved =
+    asked && previous !== undefined && previous.runId === job.approved
+      ? previous.plan
+      : undefined;
+  if (asked && approved === undefined) {
+    log.info("apply-refused", fields);
+  }
+  const automatic =
+    job.kind === "schedule" && profile.settings.autoApply && memory.reviewed;
+  const actions: Actions | undefined =
+    approved !== undefined
+      ? approvedOnly(planned.actions, approved)
+      : automatic
+        ? planned.actions
+        : undefined;
+
+  if (actions === undefined) {
+    // The person's last apply stays on show until their next one.
+    await store.putMemberState(member.id, {
+      memory,
+      lastRun: {
         runId: job.runId,
         madeAt: now().toISOString(),
         job: job.kind,
         plan,
-        applied,
-      });
-      if (outcome.rateLimited !== null)
-        throw new RateLimited(outcome.rateLimited);
-      continue;
+        applied: previous?.applied ?? null,
+      },
+    });
+    return;
+  }
+
+  if (approved !== undefined) memory.reviewed = true;
+  const done = {
+    saved: new Set<string>(),
+    followed: new Set<string>(),
+    made: new Map<string, { playlistId: string; name: string }>(),
+    filled: new Set<string>(),
+  };
+  const record = async (change: Change) => {
+    switch (change.kind) {
+      case "saved":
+        done.saved.add(change.albumId);
+        memory.saved.push({ id: change.albumId, key: change.key });
+        break;
+      case "followed":
+        done.followed.add(change.playlistId);
+        memory.playlists.push({
+          id: change.playlistId,
+          albumKey: change.albumKey,
+        });
+        break;
+      case "made":
+        done.made.set(change.albumId, {
+          playlistId: change.playlistId,
+          name: change.name,
+        });
+        memory.playlists.push({
+          id: change.playlistId,
+          albumKey: albumKey(change.albumLabel),
+        });
+        memory.unfinished.push({
+          playlistId: change.playlistId,
+          albumId: change.albumId,
+          albumLabel: change.albumLabel,
+          name: change.name,
+        });
+        break;
+      case "filled": {
+        done.filled.add(change.playlistId);
+        memory.unfinished = memory.unfinished.filter(
+          (entry) => entry.playlistId !== change.playlistId,
+        );
+        verdicts.set(change.playlistId, change.verdict);
+        await store.putVerdicts([change.verdict]);
+        const { albumId, albumLabel } = change.verdict;
+        const made = albumId === null ? undefined : done.made.get(albumId);
+        // Later members in this run follow it rather than making their own.
+        if (
+          !profile.settings.privatePlaylists &&
+          albumId !== null &&
+          albumLabel !== null &&
+          made?.playlistId === change.playlistId
+        ) {
+          group.push({
+            playlistId: change.playlistId,
+            ownerId: member.id,
+            ownerName: member.name,
+            albumId,
+            albumLabel,
+            name: made.name,
+          });
+        }
+        break;
+      }
     }
-    await store.putMemory(member.id, memory);
-    // A run that carried on keeps what its earlier invocation applied.
-    const earlier = await store.getLastRun(member.id);
-    if (applying && earlier?.runId === job.runId && earlier.applied !== null) {
-      continue;
-    }
-    await store.putLastRun(member.id, {
+    await store.putMemberState(member.id, { memory });
+  };
+
+  const outcome = await applyActions({
+    client,
+    userId: member.id,
+    actions,
+    privatePlaylists: profile.settings.privatePlaylists,
+    hasTime: () => remainingMs() > stepReserveMs,
+    record,
+    log,
+  });
+  const carried: Carried = {
+    saved: (job.carried?.saved ?? 0) + outcome.saved,
+    followed: (job.carried?.followed ?? 0) + outcome.followed,
+    created: [...(job.carried?.created ?? []), ...outcome.created],
+    finished: (job.carried?.finished ?? 0) + outcome.finished,
+    failed: (job.carried?.failed ?? 0) + outcome.failed,
+  };
+  log.info("changes-applied", {
+    ...fields,
+    save: outcome.saved,
+    follow: outcome.followed,
+    create: outcome.created.length,
+    failed: outcome.failed,
+  });
+  if (outcome.stopped?.reason === "out-of-time") {
+    // The approved plan stays as it was, so the next invocation carries on
+    // with it. What is done is in the memory already.
+    await store.putMemberState(member.id, { memory });
+    throw new OutOfTime(carried);
+  }
+  await store.putMemberState(member.id, {
+    memory,
+    lastRun: {
       runId: job.runId,
       madeAt: now().toISOString(),
       job: job.kind,
-      plan,
-      applied: applying ? nothingApplied(now()) : null,
-    });
+      plan: remaining(plan, done, memory),
+      applied: {
+        at: now().toISOString(),
+        ...carried,
+        unfinished: outcome.stopped !== null,
+      },
+    },
+  });
+  if (outcome.stopped?.reason === "rate-limited") {
+    throw new RateLimited(outcome.stopped.retryAfter);
   }
-  return { state: "finished" };
+}
+
+// What is still to do once an apply has run: everything it did not get to,
+// and anything new since the plan the person approved.
+function remaining(
+  plan: Plan,
+  done: {
+    saved: Set<string>;
+    followed: Set<string>;
+    made: Map<string, { playlistId: string; name: string }>;
+    filled: Set<string>;
+  },
+  memory: Memory,
+): Plan {
+  return {
+    ...plan,
+    first: !memory.reviewed,
+    save: plan.save.filter((entry) => !done.saved.has(entry.albumId)),
+    follow: plan.follow.filter((entry) => !done.followed.has(entry.playlistId)),
+    create: plan.create.filter((entry) => !done.made.has(entry.albumId)),
+    finish: memory.unfinished.map((entry) => ({
+      playlistId: entry.playlistId,
+      name: entry.name,
+    })),
+  };
 }

@@ -23,17 +23,46 @@ export interface GroupPlaylist {
   name: string;
 }
 
-// What the library held after the last run, and what the person removed
-// since, which no run puts back.
+// An album is remembered by a loose key of its artist and title as well as
+// its id, since the same album often has several editions with their own
+// ids. A removal is of the album, whichever edition it was.
+export const albumKey = (albumLabel: string): string => norm(albumLabel);
+
+const unfinishedSchema = z.object({
+  playlistId: z.string(),
+  albumId: z.string(),
+  albumLabel: z.string(),
+  name: z.string(),
+});
+
+export type Unfinished = z.infer<typeof unfinishedSchema>;
+
+// What the library held after the last run, what the person removed since,
+// which no run puts back, and whether they have ever applied a plan.
 export const memorySchema = z.object({
-  savedAlbums: z.array(z.string()),
-  playlists: z.array(z.string()),
-  ignoredAlbums: z.array(z.string()),
+  reviewed: z.boolean(),
+  saved: z.array(z.object({ id: z.string(), key: z.string() })),
+  playlists: z.array(
+    z.object({ id: z.string(), albumKey: z.string().nullable() }),
+  ),
+  ignoredAlbumKeys: z.array(z.string()),
   ignoredPlaylists: z.array(z.string()),
-  ignoredPlaylistAlbums: z.array(z.string()),
+  ignoredPlaylistAlbumKeys: z.array(z.string()),
+  // Playlists spotimy made whose tracks did not all go in.
+  unfinished: z.array(unfinishedSchema),
 });
 
 export type Memory = z.infer<typeof memorySchema>;
+
+export const emptyMemory = (): Memory => ({
+  reviewed: false,
+  saved: [],
+  playlists: [],
+  ignoredAlbumKeys: [],
+  ignoredPlaylists: [],
+  ignoredPlaylistAlbumKeys: [],
+  unfinished: [],
+});
 
 export interface PlanInput {
   library: Library;
@@ -44,10 +73,10 @@ export interface PlanInput {
 }
 
 export interface Actions {
-  // Album URIs to save.
-  save: string[];
-  follow: GroupPlaylist[];
-  create: { saved: SavedAlbum; name: string }[];
+  save: { albumId: string; uri: string; key: string }[];
+  follow: (GroupPlaylist & { key: string })[];
+  create: { saved: SavedAlbum; name: string; key: string }[];
+  finish: Unfinished[];
 }
 
 export interface Planned {
@@ -57,46 +86,66 @@ export interface Planned {
   memory: Memory;
 }
 
-const minus = (from: Iterable<string>, take: ReadonlySet<string>) =>
-  [...from].filter((item) => !take.has(item));
+const unique = (items: Iterable<string>) => [...new Set(items)];
 
 function nextMemory(input: PlanInput): Memory {
-  const { library, verdicts, memory } = input;
-  const saved = new Set(library.saved.map((entry) => entry.album.id));
-  const listed = new Set(library.playlists.map((playlist) => playlist.id));
-  if (memory === undefined) {
+  const { library, verdicts } = input;
+  const previous = input.memory ?? emptyMemory();
+  const saved = library.saved.map((entry) => ({
+    id: entry.album.id,
+    key: albumKey(label(entry.album)),
+  }));
+  const playlists = library.playlists.map((playlist) => {
+    const verdict = verdicts.get(playlist.id);
     return {
-      savedAlbums: [...saved],
-      playlists: [...listed],
-      ignoredAlbums: [],
-      ignoredPlaylists: [],
-      ignoredPlaylistAlbums: [],
+      id: playlist.id,
+      albumKey:
+        verdict !== undefined &&
+        verdict.albumLabel !== null &&
+        isAlbumish(verdict)
+          ? albumKey(verdict.albumLabel)
+          : null,
     };
-  }
-  const removedAlbums = minus(memory.savedAlbums, saved);
-  const removedPlaylists = minus(memory.playlists, listed);
-  const removedPlaylistAlbums = removedPlaylists.flatMap((id) => {
-    const verdict = verdicts.get(id);
-    return verdict !== undefined &&
-      verdict.albumId !== null &&
-      isAlbumish(verdict)
-      ? [verdict.albumId]
-      : [];
   });
+  if (input.memory === undefined) {
+    return { ...emptyMemory(), saved, playlists };
+  }
+  const savedIds = new Set(saved.map((entry) => entry.id));
+  const savedKeys = new Set(saved.map((entry) => entry.key));
+  const listed = new Set(playlists.map((playlist) => playlist.id));
+  const coveredKeys = new Set(
+    playlists.flatMap((playlist) =>
+      playlist.albumKey === null ? [] : [playlist.albumKey],
+    ),
+  );
+  // Gone by id and by key: swapping one edition for another is not removing.
+  const removedAlbumKeys = previous.saved
+    .filter((entry) => !savedIds.has(entry.id) && !savedKeys.has(entry.key))
+    .map((entry) => entry.key);
+  const removedPlaylists = previous.playlists.filter(
+    (playlist) => !listed.has(playlist.id),
+  );
   return {
-    savedAlbums: [...saved],
-    playlists: [...listed],
-    ignoredAlbums: minus(
-      new Set([...memory.ignoredAlbums, ...removedAlbums]),
-      saved,
+    reviewed: previous.reviewed,
+    saved,
+    playlists,
+    ignoredAlbumKeys: unique([
+      ...previous.ignoredAlbumKeys,
+      ...removedAlbumKeys,
+    ]).filter((key) => !savedKeys.has(key)),
+    ignoredPlaylists: unique([
+      ...previous.ignoredPlaylists,
+      ...removedPlaylists.map((playlist) => playlist.id),
+    ]).filter((id) => !listed.has(id)),
+    ignoredPlaylistAlbumKeys: unique([
+      ...previous.ignoredPlaylistAlbumKeys,
+      ...removedPlaylists.flatMap((playlist) =>
+        playlist.albumKey === null ? [] : [playlist.albumKey],
+      ),
+    ]).filter((key) => !coveredKeys.has(key)),
+    unfinished: previous.unfinished.filter((entry) =>
+      listed.has(entry.playlistId),
     ),
-    ignoredPlaylists: minus(
-      new Set([...memory.ignoredPlaylists, ...removedPlaylists]),
-      listed,
-    ),
-    ignoredPlaylistAlbums: [
-      ...new Set([...memory.ignoredPlaylistAlbums, ...removedPlaylistAlbums]),
-    ],
   };
 }
 
@@ -105,16 +154,16 @@ const pct = (share: number) => `${String(Math.round(share * 100))}%`;
 export function makePlan(input: PlanInput): Planned {
   const { library, settings, verdicts, group } = input;
   const memory = nextMemory(input);
-  const ignoredAlbums = new Set(memory.ignoredAlbums);
+  const ignoredAlbums = new Set(memory.ignoredAlbumKeys);
   const ignoredPlaylists = new Set(memory.ignoredPlaylists);
-  const ignoredPlaylistAlbums = new Set(memory.ignoredPlaylistAlbums);
+  const ignoredPlaylistAlbums = new Set(memory.ignoredPlaylistAlbumKeys);
 
   const savedIds = new Set(library.saved.map((entry) => entry.album.id));
   const savedKeys = new Set(
-    library.saved.map((entry) => norm(label(entry.album))),
+    library.saved.map((entry) => albumKey(label(entry.album))),
   );
-  const isSaved = (albumId: string, albumLabel: string) =>
-    savedIds.has(albumId) || savedKeys.has(norm(albumLabel));
+  const isSaved = (albumId: string, key: string) =>
+    savedIds.has(albumId) || savedKeys.has(key);
 
   const listed = new Set(library.playlists.map((playlist) => playlist.id));
   const mine = library.playlists.flatMap((playlist) => {
@@ -126,32 +175,39 @@ export function makePlan(input: PlanInput): Planned {
   // mostly that album, or is named after it in either order.
   const coveredIds = new Set<string>();
   const coveredKeys = new Set<string>();
-  for (const { playlist, verdict } of mine) {
+  for (const { verdict } of mine) {
     if (
       verdict.albumId !== null &&
       verdict.albumLabel !== null &&
       isAlbumish(verdict)
     ) {
       coveredIds.add(verdict.albumId);
-      coveredKeys.add(norm(verdict.albumLabel));
+      coveredKeys.add(albumKey(verdict.albumLabel));
     }
+  }
+  for (const playlist of library.playlists) {
     for (const key of nameKeys(playlist.name)) coveredKeys.add(key);
   }
-  const isCovered = (albumId: string, albumLabel: string) =>
-    coveredIds.has(albumId) || coveredKeys.has(norm(albumLabel));
+  const isCovered = (albumId: string, key: string) =>
+    coveredIds.has(albumId) || coveredKeys.has(key);
+  const cover = (albumId: string, key: string) => {
+    coveredIds.add(albumId);
+    coveredKeys.add(key);
+  };
 
   const plan: Plan = {
-    first: input.memory === undefined,
+    first: !memory.reviewed,
     save: [],
     follow: [],
     create: [],
+    finish: [],
     review: [],
     ignored: {
-      albums: memory.ignoredAlbums.length,
+      albums: memory.ignoredAlbumKeys.length,
       playlists: memory.ignoredPlaylists.length,
     },
   };
-  const actions: Actions = { save: [], follow: [], create: [] };
+  const actions: Actions = { save: [], follow: [], create: [], finish: [] };
   const queued = new Set<string>();
 
   const save = (
@@ -161,12 +217,19 @@ export function makePlan(input: PlanInput): Planned {
     from: string,
     match: Plan["save"][number]["match"],
   ) => {
-    if (queued.has(albumId) || ignoredAlbums.has(albumId)) return;
-    if (isSaved(albumId, albumLabel)) return;
-    queued.add(albumId);
+    const key = albumKey(albumLabel);
+    if (queued.has(key) || ignoredAlbums.has(key)) return;
+    if (isSaved(albumId, key)) return;
+    queued.add(key);
     plan.save.push({ albumId, label: albumLabel, from, match });
-    actions.save.push(albumUri);
+    actions.save.push({ albumId, uri: albumUri, key });
   };
+
+  // 0. Playlists spotimy made and could not fill.
+  for (const entry of memory.unfinished) {
+    plan.finish.push({ playlistId: entry.playlistId, name: entry.name });
+    actions.finish.push(entry);
+  }
 
   // 1. Album playlists in the library whose album is not saved.
   for (const { playlist, verdict } of mine) {
@@ -178,22 +241,23 @@ export function makePlan(input: PlanInput): Planned {
     save(albumId, albumUri, albumLabel, playlist.name, verdict.method);
   }
 
-  // 2. The group's album playlists this library has none of.
+  // 2. The group's album playlists this library has none of, unless the
+  //    person removed the album or a playlist of it.
   if (settings.followGroup) {
     for (const shared of group) {
+      const key = albumKey(shared.albumLabel);
       if (shared.ownerId === library.userId) continue;
       if (listed.has(shared.playlistId)) continue;
       if (ignoredPlaylists.has(shared.playlistId)) continue;
-      if (ignoredPlaylistAlbums.has(shared.albumId)) continue;
-      if (isCovered(shared.albumId, shared.albumLabel)) continue;
-      coveredIds.add(shared.albumId);
-      coveredKeys.add(norm(shared.albumLabel));
+      if (ignoredPlaylistAlbums.has(key) || ignoredAlbums.has(key)) continue;
+      if (isCovered(shared.albumId, key)) continue;
+      cover(shared.albumId, key);
       plan.follow.push({
         playlistId: shared.playlistId,
         name: shared.name,
         ownerName: shared.ownerName,
       });
-      actions.follow.push(shared);
+      actions.follow.push({ ...shared, key });
       save(
         shared.albumId,
         `spotify:album:${shared.albumId}`,
@@ -205,22 +269,23 @@ export function makePlan(input: PlanInput): Planned {
   }
 
   // 3. Saved albums with no playlist, oldest first so the newest ends up on
-  //    top of the library.
+  //    top of the library. Two editions of one album get one playlist.
   const byAge = [...library.saved].sort((a, b) =>
     a.added_at.localeCompare(b.added_at),
   );
   for (const saved of byAge) {
     const { album } = saved;
-    if (isCovered(album.id, label(album))) continue;
-    if (ignoredPlaylistAlbums.has(album.id)) continue;
-    coveredIds.add(album.id);
+    const key = albumKey(label(album));
+    if (isCovered(album.id, key)) continue;
+    if (ignoredPlaylistAlbums.has(key)) continue;
+    cover(album.id, key);
     const name = playlistName(album, settings.albumFirst);
     plan.create.push({
       albumId: album.id,
       name,
       year: saved.added_at.slice(0, 4),
     });
-    actions.create.push({ saved, name });
+    actions.create.push({ saved, name, key });
   }
 
   // 4. What was left alone, for the person to look at.
@@ -254,3 +319,25 @@ export function makePlan(input: PlanInput): Planned {
 
   return { plan, actions, memory };
 }
+
+// Keeps only the actions the person saw in the plan they approved. Anything
+// new since waits for them to see it (sync-safety.md).
+export function approvedOnly(actions: Actions, approved: Plan): Actions {
+  const save = new Set(approved.save.map((entry) => entry.albumId));
+  const follow = new Set(approved.follow.map((entry) => entry.playlistId));
+  const create = new Set(approved.create.map((entry) => entry.albumId));
+  const finish = new Set(approved.finish.map((entry) => entry.playlistId));
+  return {
+    save: actions.save.filter((entry) => save.has(entry.albumId)),
+    follow: actions.follow.filter((entry) => follow.has(entry.playlistId)),
+    create: actions.create.filter((entry) => create.has(entry.saved.album.id)),
+    finish: actions.finish.filter((entry) => finish.has(entry.playlistId)),
+  };
+}
+
+export const hasActions = (actions: Actions): boolean =>
+  actions.save.length +
+    actions.follow.length +
+    actions.create.length +
+    actions.finish.length >
+  0;

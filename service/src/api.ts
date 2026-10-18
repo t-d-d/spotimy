@@ -1,7 +1,9 @@
 // The page's API and Spotify sign-in (identity.md).
 import {
+  applyRequestSchema,
   defaultSettings,
   settingsSchema,
+  type Refusal,
   type Status,
 } from "../../shared/page-api";
 import type { UserId } from "./ids";
@@ -26,6 +28,7 @@ import {
 } from "./spotify/auth";
 import { createSpotifyClient, SpotifyError } from "./spotify/client";
 import { meSchema } from "./spotify/schemas";
+import { lockSeconds } from "./sync/run";
 
 export interface Call {
   route: Route;
@@ -39,10 +42,7 @@ const noStore = { "cache-control": "no-store" };
 const json = (status: number, body: unknown) =>
   Response.json(body, { status, headers: noStore });
 
-const refuse = (
-  status: number,
-  error: "signed-out" | "busy" | "invalid" | "origin",
-) => json(status, { error });
+const refuse = (status: number, error: Refusal) => json(status, { error });
 
 function redirect(location: string, cookies: string[] = []): Response {
   const headers = new Headers({ location, ...noStore });
@@ -117,6 +117,7 @@ export async function serve(call: Call, services: Services): Promise<Response> {
     case "POST /api/apply":
       return startRun(
         route === "POST /api/apply" ? "apply" : "check",
+        call.request,
         userId,
         services,
         log,
@@ -208,31 +209,65 @@ async function finishSignIn(call: Call, services: Services): Promise<Response> {
 
 async function startRun(
   kind: "check" | "apply",
+  request: Request,
   userId: UserId,
   services: Services,
   log: Logger,
 ): Promise<Response> {
-  const run = await services.store.getRun();
-  const nowSeconds = Math.floor(services.now().getTime() / 1000);
-  if (run !== undefined && run.expiresAt > nowSeconds) {
+  const { store, now } = services;
+  // An apply names the plan the person saw. If a run has made a newer one
+  // since, they look again first (sync-safety.md).
+  let approved: string | null = null;
+  if (kind === "apply") {
+    const body = await parsedBody(request, applyRequestSchema);
+    if (body === undefined) {
+      log.info("input-invalid", { userId });
+      return refuse(400, "invalid");
+    }
+    const last = await store.getLastRun(userId);
+    if (last?.runId !== body.plan) {
+      log.info("apply-refused", { userId });
+      return refuse(409, "changed");
+    }
+    approved = body.plan;
+  }
+  // The lock is taken here, so a second press while the first is starting
+  // is told the group is busy, rather than started and dropped.
+  const runId = newRunId();
+  const taken = await store.takeRun(
+    {
+      runId,
+      job: kind,
+      requestedBy: userId,
+      state: "running",
+      startedAt: now().toISOString(),
+      retryAt: null,
+      expiresAt: Math.floor(now().getTime() / 1000) + lockSeconds,
+    },
+    now(),
+  );
+  if (!taken) {
     log.info("run-busy", { userId, job: kind });
     return refuse(409, "busy");
   }
-  await services.startJob({
-    kind,
-    requestedBy: userId,
-    runId: newRunId(),
-    hop: 0,
-  });
-  log.info("run-requested", { userId, job: kind });
-  return json(202, await status(userId, services, kind));
+  try {
+    await services.startJob({
+      kind,
+      requestedBy: userId,
+      runId,
+      hop: 0,
+      approved,
+      carried: null,
+    });
+  } catch (error) {
+    await store.endRun(runId);
+    throw error;
+  }
+  log.info("run-requested", { userId, job: kind, runId });
+  return json(202, await status(userId, services));
 }
 
-async function status(
-  userId: UserId,
-  services: Services,
-  starting?: "check" | "apply",
-): Promise<Status> {
+async function status(userId: UserId, services: Services): Promise<Status> {
   const { store, now } = services;
   const [profile, members, run, last] = await Promise.all([
     store.getProfile(userId),
@@ -247,20 +282,12 @@ async function status(
     user: { id: userId, name: profile?.name ?? userId },
     members,
     settings: profile?.settings ?? defaultSettings,
-    run:
-      starting !== undefined && active === undefined
-        ? {
-            state: "running",
-            job: starting,
-            startedAt: now().toISOString(),
-            retryAt: null,
-          }
-        : {
-            state: active?.state ?? "idle",
-            job: active?.job ?? null,
-            startedAt: active?.startedAt ?? null,
-            retryAt: active?.retryAt ?? null,
-          },
+    run: {
+      state: active?.state ?? "idle",
+      job: active?.job ?? null,
+      startedAt: active?.startedAt ?? null,
+      retryAt: active?.retryAt ?? null,
+    },
     last: last ?? null,
   };
 }

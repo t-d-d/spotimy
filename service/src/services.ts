@@ -53,7 +53,9 @@ export function ready(): Services {
         accountsBase: env.spotifyAccountsBase,
         clientId: env.spotifyClientId,
         initial,
-        save: (next) => store.putTokens(member.id, next),
+        save: async (next) => {
+          await store.putTokens(member.id, next);
+        },
         now,
       });
       try {

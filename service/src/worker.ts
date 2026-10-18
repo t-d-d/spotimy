@@ -6,6 +6,8 @@ import { createLogger, errorClass } from "./log";
 import { ready } from "./services";
 import { runGroup, type Job } from "./sync/run";
 
+export type { Job };
+
 const scheduledSchema = z.object({
   source: z.literal("aws.events"),
   "detail-type": z.literal("Scheduled Event"),
@@ -18,7 +20,14 @@ export interface WorkerContext {
 
 export function jobOf(event: unknown): Job | undefined {
   if (scheduledSchema.safeParse(event).success) {
-    return { kind: "schedule", requestedBy: null, runId: newRunId(), hop: 0 };
+    return {
+      kind: "schedule",
+      requestedBy: null,
+      runId: newRunId(),
+      hop: 0,
+      approved: null,
+      carried: null,
+    };
   }
   const parsed = jobSchema.safeParse(event);
   return parsed.success ? parsed.data : undefined;
@@ -44,7 +53,7 @@ export async function handler(
       remainingMs: () => context.getRemainingTimeInMillis(),
     });
     if (result.state === "continue") {
-      await startJob({ ...job, hop: job.hop + 1 });
+      await startJob({ ...job, hop: job.hop + 1, carried: result.carried });
     }
   } catch (error) {
     // runGroup has logged it and freed the lock. Async invokes are not

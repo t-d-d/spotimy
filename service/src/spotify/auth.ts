@@ -6,7 +6,7 @@ import type { TokenSource } from "./client";
 import { tokenSchema, type TokenAnswer } from "./schemas";
 
 // Only what the sync uses: read playlists and saved albums, save albums,
-// follow and create playlists.
+// and follow and make playlists, which the playlist-modify scopes cover.
 export const scopes = [
   "playlist-read-private",
   "playlist-read-collaborative",
@@ -14,7 +14,6 @@ export const scopes = [
   "playlist-modify-public",
   "user-library-read",
   "user-library-modify",
-  "user-follow-modify",
 ] as const;
 
 const base64url = (bytes: Buffer) => bytes.toString("base64url");

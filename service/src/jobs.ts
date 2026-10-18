@@ -7,11 +7,25 @@ import { awsClientConfig } from "./aws";
 import { runIdSchema, userIdSchema } from "./ids";
 import type { Job } from "./sync/run";
 
+const count = z.number().int().nonnegative();
+
 export const jobSchema = z.object({
   kind: z.enum(jobs),
   requestedBy: userIdSchema.nullable(),
   runId: runIdSchema,
-  hop: z.number().int().nonnegative(),
+  hop: count,
+  // For an apply, the run that made the plan the person saw and approved.
+  approved: z.string().nullable(),
+  // What earlier invocations of this run applied, carried to the next.
+  carried: z
+    .object({
+      saved: count,
+      followed: count,
+      created: z.array(z.object({ name: z.string(), year: z.string() })),
+      finished: count,
+      failed: count,
+    })
+    .nullable(),
 });
 
 export const newRunId = (): string => randomBytes(12).toString("base64url");

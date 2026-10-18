@@ -23,6 +23,9 @@ so it must hold refresh tokens. Those never leave the service.
   run time.
 - Every request that changes anything must carry an Origin header equal
   to PUBLIC_URL.
+- The scopes are the two playlist-read, the two playlist-modify and the
+  two user-library scopes. Following a playlist needs playlist-modify,
+  not user-follow-modify, which is for artists and users.
 - Spotify tokens are stored only in the person's TOKEN item, and never
   sent to the page or logged.
 - A refreshed token that comes with a new refresh token replaces the

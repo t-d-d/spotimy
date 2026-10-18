@@ -83,6 +83,12 @@ export interface FakeSpotify {
   authorize: (userId: string, challenge: string, redirectUri: string) => string;
   // The next `times` API calls get a 429 with this Retry-After.
   limitNext: (times: number, retryAfter: number) => void;
+  // As limitNext, but only for calls that match, such as "POST /me/playlists".
+  limitMatching: (
+    match: (method: string, path: string) => boolean,
+    times: number,
+    retryAfter: number,
+  ) => void;
   expireAccessTokens: () => void;
   reset: () => void;
   close: () => Promise<void>;
@@ -106,7 +112,9 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
     string,
     { userId: string; challenge: string; redirectUri: string }
   >();
-  let limited = { times: 0, retryAfter: 0 };
+  type Matcher = (method: string, path: string) => boolean;
+  const always: Matcher = () => true;
+  let limited = { times: 0, retryAfter: 0, match: always };
   const calls: Call[] = [];
   let base = "";
 
@@ -264,7 +272,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       path: `${path}${url.search}`,
       userId,
     });
-    if (limited.times > 0) {
+    if (limited.times > 0 && limited.match(request.method ?? "", path)) {
       limited.times -= 1;
       reply(
         response,
@@ -570,7 +578,10 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       return code;
     },
     limitNext: (times, retryAfter) => {
-      limited = { times, retryAfter };
+      limited = { times, retryAfter, match: always };
+    },
+    limitMatching: (match, times, retryAfter) => {
+      limited = { times, retryAfter, match };
     },
     expireAccessTokens: () => {
       access = new Map();
@@ -582,7 +593,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       access = new Map();
       refresh = new Map();
       codes = new Map();
-      limited = { times: 0, retryAfter: 0 };
+      limited = { times: 0, retryAfter: 0, match: always };
       calls.length = 0;
     },
     close: () =>

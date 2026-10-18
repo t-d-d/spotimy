@@ -2,6 +2,7 @@
 // and the real Spotify client talking to the fake Spotify.
 import { describe, expect, it } from "vitest";
 import { userIdSchema, type UserId } from "./src/ids";
+import type { Job } from "./src/worker";
 import { ready } from "./src/services";
 import { handler } from "./src/worker";
 import { coverUrl } from "../test/fake-spotify.ts";
@@ -96,28 +97,34 @@ async function setUp(): Promise<void> {
   }
 }
 
-const context = (remaining = 600_000) => ({
+const context = (remaining: () => number = () => 600_000) => ({
   awsRequestId: "test-request",
-  getRemainingTimeInMillis: () => remaining,
+  getRemainingTimeInMillis: remaining,
 });
 
 let runs = 0;
-async function run(
-  kind: "check" | "apply" | "schedule",
-  requestedBy: UserId | null = thomas,
-  remaining?: number,
-) {
+const nextRunId = () => {
   runs += 1;
-  await handler(
-    {
-      kind,
-      requestedBy: kind === "schedule" ? null : requestedBy,
-      runId: `testrun${String(runs).padStart(4, "0")}`,
-      hop: 0,
-    },
-    context(remaining),
-  );
-}
+  return `testrun${String(runs).padStart(4, "0")}`;
+};
+
+const job = (overrides: Partial<Job>): Job => ({
+  kind: "check",
+  requestedBy: thomas,
+  runId: nextRunId(),
+  hop: 0,
+  approved: null,
+  carried: null,
+  ...overrides,
+});
+
+const check = async (remaining?: () => number) => {
+  await handler(job({ kind: "check" }), context(remaining));
+};
+
+const schedule = async () => {
+  await handler(job({ kind: "schedule", requestedBy: null }), context());
+};
 
 const lastRun = async (id: UserId) => {
   const last = await ready().store.getLastRun(id);
@@ -125,12 +132,24 @@ const lastRun = async (id: UserId) => {
   return last;
 };
 
+// Applies the plan the person was last shown, as pressing Apply does.
+const apply = async (id: UserId = thomas, remaining?: () => number) => {
+  const shown = await ready().store.getLastRun(id);
+  await handler(
+    job({ kind: "apply", requestedBy: id, approved: shown?.runId ?? null }),
+    context(remaining),
+  );
+};
+
 const writes = () => spotify.calls.filter((call) => call.method !== "GET");
+
+const namesIn = (id: string) =>
+  spotify.library(id).playlists.map((each) => spotify.playlist(each)?.name);
 
 describe("a check", () => {
   it("plans for every member and changes nothing", async () => {
     await setUp();
-    await run("check");
+    await check();
 
     expect(writes()).toEqual([]);
     const forThomas = (await lastRun(thomas)).plan;
@@ -172,37 +191,53 @@ describe("a check", () => {
     expect(forMatt.review.map((entry) => entry.kind)).toEqual(["mixed"]);
   });
 
-  it("reads a member's own playlist with the member's own token, and never reads it twice", async () => {
+  it("reads a member's own playlist with the member's own token, never twice, and only through /items", async () => {
     await setUp();
-    await run("check");
+    await check();
     const reads = spotify.calls.filter((call) =>
-      /^\/playlists\/\w+\/items/u.test(call.path),
+      /^\/playlists\/\w+\//u.test(call.path),
     );
+    expect(
+      reads.every((call) => /^\/playlists\/\w+\/items/u.test(call.path)),
+    ).toBe(true);
     expect(
       reads
         .filter((call) => call.path.startsWith("/playlists/MCable/"))
         .every((call) => call.userId === "matt"),
     ).toBe(true);
-    expect(
-      reads.some((call) => call.path.startsWith("/playlists/RCaro/")),
-    ).toBe(true);
 
     spotify.calls.length = 0;
-    await run("check");
+    await check();
     expect(
       spotify.calls.filter((call) =>
         /^\/playlists\/\w+\/items/u.test(call.path),
       ),
     ).toEqual([]);
   });
+
+  it("leaves a member's playlists unread while that member cannot be reached", async () => {
+    await setUp();
+    await ready().store.putTokens(matt, {
+      accessToken: "gone",
+      refreshToken: "revoked",
+      expiresAt: 0,
+    });
+    await check();
+    expect(await ready().store.getLastRun(matt)).toBeUndefined();
+    const verdicts = await ready().store.getVerdicts();
+    expect(verdicts.has("MCable")).toBe(false);
+    expect(
+      (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
+    ).not.toContain("Cable");
+  });
 });
 
 describe("an apply", () => {
   it("changes only the library of the person who asked", async () => {
     await setUp();
-    await run("check");
+    await check();
     const mattBefore = spotify.library("matt");
-    await run("apply", thomas);
+    await apply(thomas);
 
     const library = spotify.library("thomas");
     expect(library.saved).toEqual(
@@ -220,17 +255,66 @@ describe("an apply", () => {
     expect(made[0]?.tracks).toHaveLength(8);
     expect(spotify.library("matt")).toEqual(mattBefore);
 
-    const applied = (await lastRun(thomas)).applied;
-    expect(applied).toMatchObject({ saved: 4, followed: 1, failed: 0 });
-    expect(applied?.created).toEqual([
+    const after = await lastRun(thomas);
+    expect(after.applied).toMatchObject({
+      saved: 4,
+      followed: 1,
+      failed: 0,
+      unfinished: false,
+    });
+    expect(after.applied?.created).toEqual([
       { name: "Kathryn Joseph – for you who are the wronged", year: "2025" },
     ]);
+    expect(after.plan.first).toBe(false);
+    expect([after.plan.save, after.plan.follow, after.plan.create]).toEqual([
+      [],
+      [],
+      [],
+    ]);
+  });
+
+  it("applies only what was in the plan the person saw", async () => {
+    await setUp();
+    await check();
+    // Something new arrives after the person looked.
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.addPlaylist("matt", {
+      id: "MWall",
+      name: "The Smile – Wall of Eyes",
+      tracks: tracks("Wall", 8),
+    });
+    await apply(thomas);
+    expect(spotify.library("thomas").playlists).not.toContain("MWall");
+    expect(spotify.library("thomas").saved).not.toContain("Wall");
+    // It waits in the next plan for them to see.
+    expect(
+      (await lastRun(thomas)).plan.follow.map((entry) => entry.playlistId),
+    ).toEqual(["MWall"]);
+  });
+
+  it("does nothing when the plan it names has been replaced", async () => {
+    await setUp();
+    await check();
+    const seen = (await lastRun(thomas)).runId;
+    await check();
+    spotify.calls.length = 0;
+    await handler(
+      job({ kind: "apply", requestedBy: thomas, approved: seen }),
+      context(),
+    );
+    expect(writes()).toEqual([]);
   });
 
   it("leaves nothing to do the next time, and offers the new playlist to the group", async () => {
     await setUp();
-    await run("apply", thomas);
-    await run("check");
+    await check();
+    await apply(thomas);
+    await check();
     const forThomas = (await lastRun(thomas)).plan;
     expect([forThomas.save, forThomas.follow, forThomas.create]).toEqual([
       [],
@@ -243,12 +327,23 @@ describe("an apply", () => {
     );
   });
 
+  it("keeps showing what was applied after someone else's check", async () => {
+    await setUp();
+    await check();
+    await apply(thomas);
+    const applied = (await lastRun(thomas)).applied;
+    await handler(job({ kind: "check", requestedBy: matt }), context());
+    expect((await lastRun(thomas)).applied).toEqual(applied);
+  });
+
   it("never puts back what the person removed", async () => {
     await setUp();
-    await run("apply", thomas);
+    await check();
+    await apply(thomas);
     spotify.unsave("thomas", "Bully");
     spotify.unfollow("thomas", "MSmile");
-    await run("apply", thomas);
+    await check();
+    await apply(thomas);
     const library = spotify.library("thomas");
     expect(library.saved).not.toContain("Bully");
     expect(library.playlists).not.toContain("MSmile");
@@ -260,7 +355,7 @@ describe("an apply", () => {
 });
 
 describe("the daily schedule", () => {
-  it("applies for those who turned it on, but never a first plan", async () => {
+  it("applies only for those who turned it on and have applied once themselves", async () => {
     await setUp();
     const { store } = ready();
     await store.putSettings(matt, {
@@ -269,10 +364,20 @@ describe("the daily schedule", () => {
       albumFirst: false,
       privatePlaylists: false,
     });
-    await run("schedule");
+    await schedule();
+    await schedule();
     expect(writes()).toEqual([]);
-    await run("schedule");
-    expect(spotify.library("matt").playlists).toContain("TBully");
+
+    await apply(matt);
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.save("matt", "Wall", "2026-10-01T00:00:00Z");
+    await schedule();
+    expect(namesIn("matt")).toContain("The Smile – Wall of Eyes");
     expect(spotify.library("thomas").saved).not.toContain("Bully");
   });
 });
@@ -281,7 +386,7 @@ describe("limits and failures", () => {
   it("pauses when Spotify asks for a long wait, and holds the group's run until then", async () => {
     await setUp();
     spotify.limitNext(1, 3600);
-    await run("check");
+    await check();
     const lock = await ready().store.getRun();
     expect(lock).toMatchObject({ state: "paused" });
     expect(Date.parse(lock?.retryAt ?? "")).toBeGreaterThan(
@@ -289,13 +394,13 @@ describe("limits and failures", () => {
     );
 
     spotify.calls.length = 0;
-    await run("check");
+    await check();
     expect(spotify.calls).toEqual([]);
   });
 
   it("carries on in a fresh invocation when time runs short, keeping the run", async () => {
     await setUp();
-    await run("check", thomas, 1000);
+    await check(() => 1000);
     expect(lambda.invoked).toHaveLength(1);
     const next = lambda.invoked[0];
     expect(next).toMatchObject({ kind: "check", hop: 1 });
@@ -306,6 +411,112 @@ describe("limits and failures", () => {
     expect(await ready().store.getRun()).toBeUndefined();
   });
 
+  it("carries an apply on in a fresh invocation without doing anything twice", async () => {
+    await setUp();
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.save("thomas", "Wall", "2026-10-01T00:00:00Z");
+    await check();
+    // Time runs short once the first new playlist is made.
+    await apply(thomas, () =>
+      spotify.calls.some(
+        (call) => call.method === "POST" && call.path === "/me/playlists",
+      )
+        ? 1000
+        : 600_000,
+    );
+    expect(lambda.invoked).toHaveLength(1);
+    expect(
+      namesIn("thomas").filter(
+        (name) =>
+          name?.includes("Kathryn") === true || name?.includes("Wall") === true,
+      ),
+    ).toHaveLength(1);
+
+    await handler(lambda.invoked[0], context());
+    const names = namesIn("thomas");
+    expect(
+      names.filter(
+        (name) => name === "Kathryn Joseph – for you who are the wronged",
+      ),
+    ).toHaveLength(1);
+    expect(
+      names.filter((name) => name === "The Smile – Wall of Eyes"),
+    ).toHaveLength(1);
+    const applied = (await lastRun(thomas)).applied;
+    expect(applied?.created).toHaveLength(2);
+    expect(applied).toMatchObject({ saved: 4, followed: 1, unfinished: false });
+  });
+
+  it("remembers what an apply did before Spotify stopped it, and says it is unfinished", async () => {
+    await setUp();
+    await check();
+    spotify.limitMatching(
+      (method, path) => method === "POST" && path === "/me/playlists",
+      1,
+      3600,
+    );
+    await apply(thomas);
+    const after = await lastRun(thomas);
+    expect(after.applied).toMatchObject({
+      saved: 4,
+      followed: 1,
+      unfinished: true,
+    });
+    expect(after.plan.create.map((entry) => entry.albumId)).toEqual(["Kath"]);
+
+    // The person unsaves an album spotimy just saved. The next apply leaves it.
+    spotify.unsave("thomas", "Bully");
+    await ready().store.endRun((await ready().store.getRun())?.runId ?? "");
+    await check();
+    await apply(thomas);
+    expect(spotify.library("thomas").saved).not.toContain("Bully");
+    expect(namesIn("thomas")).toContain(
+      "Kathryn Joseph – for you who are the wronged",
+    );
+  });
+
+  it("finishes a playlist it made but could not fill", async () => {
+    await setUp();
+    await check();
+    spotify.limitMatching(
+      (method, path) =>
+        method === "POST" && /^\/playlists\/\w+\/items$/u.test(path),
+      1,
+      3600,
+    );
+    await apply(thomas);
+    const made = spotify
+      .library("thomas")
+      .playlists.find(
+        (id) =>
+          spotify.playlist(id)?.name ===
+          "Kathryn Joseph – for you who are the wronged",
+      );
+    expect(made).toBeDefined();
+    expect(spotify.playlist(made ?? "")?.tracks).toHaveLength(0);
+    expect((await lastRun(thomas)).plan.finish).toEqual([
+      {
+        playlistId: made,
+        name: "Kathryn Joseph – for you who are the wronged",
+      },
+    ]);
+
+    await ready().store.endRun((await ready().store.getRun())?.runId ?? "");
+    await apply(thomas);
+    expect(spotify.playlist(made ?? "")?.tracks).toHaveLength(8);
+    expect(
+      namesIn("thomas").filter(
+        (name) => name === "Kathryn Joseph – for you who are the wronged",
+      ),
+    ).toHaveLength(1);
+    expect((await lastRun(thomas)).plan.finish).toEqual([]);
+  });
+
   it("skips a member whose Spotify access is gone, and plans for the rest", async () => {
     await setUp();
     const { store } = ready();
@@ -314,9 +525,37 @@ describe("limits and failures", () => {
       refreshToken: "revoked",
       expiresAt: 0,
     });
-    await run("check");
+    await check();
     expect(await store.getLastRun(matt)).toBeUndefined();
     expect((await lastRun(thomas)).plan.save.length).toBeGreaterThan(0);
+  });
+
+  it("keeps nothing of someone who left during a run", async () => {
+    await setUp();
+    const { store } = ready();
+    await store.leave(thomas);
+    expect(
+      await store.putMemberState(thomas, {
+        memory: {
+          reviewed: true,
+          saved: [],
+          playlists: [],
+          ignoredAlbumKeys: [],
+          ignoredPlaylists: [],
+          ignoredPlaylistAlbumKeys: [],
+          unfinished: [],
+        },
+      }),
+    ).toBe(false);
+    expect(await store.getMemory(thomas)).toBeUndefined();
+    expect(
+      await store.putTokens(thomas, {
+        accessToken: "a",
+        refreshToken: "r",
+        expiresAt: 0,
+      }),
+    ).toBe(false);
+    expect(await store.getTokens(thomas)).toBeUndefined();
   });
 
   it("does nothing while another run holds the group", async () => {
@@ -334,7 +573,7 @@ describe("limits and failures", () => {
       },
       new Date(),
     );
-    await run("check");
+    await check();
     expect(spotify.calls).toEqual([]);
     expect(await store.getLastRun(thomas)).toBeUndefined();
   });

@@ -2,6 +2,7 @@
 import {
   ConditionalCheckFailedException,
   DynamoDBClient,
+  TransactionCanceledException,
 } from "@aws-sdk/client-dynamodb";
 import {
   BatchWriteCommand,
@@ -68,19 +69,25 @@ export interface Store {
   join: (member: Member, tokens: StoredTokens, now: Date) => Promise<void>;
   listMembers: () => Promise<Member[]>;
   getTokens: (id: UserId) => Promise<StoredTokens | undefined>;
-  putTokens: (id: UserId, tokens: StoredTokens) => Promise<void>;
+  // Writes only while the person is a member, so a run or a token refresh
+  // that ends after they left keeps nothing of theirs. False if they left.
+  putTokens: (id: UserId, tokens: StoredTokens) => Promise<boolean>;
   getVerdicts: () => Promise<Map<string, Verdict>>;
   putVerdicts: (verdicts: Verdict[]) => Promise<void>;
   getLastRun: (id: UserId) => Promise<LastRun | undefined>;
-  putLastRun: (id: UserId, run: LastRun) => Promise<void>;
   getMemory: (id: UserId) => Promise<Memory | undefined>;
-  putMemory: (id: UserId, memory: Memory) => Promise<void>;
+  // Writes only while the person is a member, as putTokens does.
+  putMemberState: (
+    id: UserId,
+    state: { memory: Memory; lastRun?: LastRun },
+  ) => Promise<boolean>;
   getRun: () => Promise<RunState | undefined>;
   // Takes the group's one run, if it is free, lapsed or already this run's.
   takeRun: (run: RunState, now: Date) => Promise<boolean>;
   pauseRun: (runId: string, retryAt: Date) => Promise<void>;
   endRun: (runId: string) => Promise<void>;
-  // Deletes everything the person's key holds, and their membership.
+  // Deletes everything the person's key holds, their membership, and what
+  // was found about the playlists they own.
   leave: (id: UserId) => Promise<void>;
 }
 
@@ -173,6 +180,40 @@ export function createStore(config: {
     }
   };
 
+  const whileMember = async (
+    id: UserId,
+    writes: { key: Key; value: object }[],
+  ): Promise<boolean> => {
+    try {
+      await db.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName,
+                Key: keys.profile(id),
+                ConditionExpression: "attribute_exists(pk)",
+              },
+            },
+            ...writes.map(({ key, value }) => ({
+              Put: { TableName, Item: { ...value, ...key } },
+            })),
+          ],
+        }),
+      );
+      return true;
+    } catch (error) {
+      // Only a failed check means they left. A conflict is thrown on.
+      if (
+        error instanceof TransactionCanceledException &&
+        error.CancellationReasons?.[0]?.Code === "ConditionalCheckFailed"
+      ) {
+        return false;
+      }
+      throw error;
+    }
+  };
+
   return {
     getProfile: (id) => get(keys.profile(id), profileSchema),
 
@@ -227,7 +268,8 @@ export function createStore(config: {
 
     getTokens: (id) => get(keys.token(id), tokensSchema),
 
-    putTokens: (id, tokens) => put(keys.token(id), tokens),
+    putTokens: (id, tokens) =>
+      whileMember(id, [{ key: keys.token(id), value: tokens }]),
 
     getVerdicts: async () => {
       const items = await query(keys.playlists().pk, keys.playlists().prefix);
@@ -251,11 +293,15 @@ export function createStore(config: {
 
     getLastRun: (id) => get(keys.plan(id), lastRunSchema),
 
-    putLastRun: (id, run) => put(keys.plan(id), run),
-
     getMemory: (id) => get(keys.memory(id), memorySchema),
 
-    putMemory: (id, memory) => put(keys.memory(id), memory),
+    putMemberState: (id, state) =>
+      whileMember(id, [
+        { key: keys.memory(id), value: state.memory },
+        ...(state.lastRun === undefined
+          ? []
+          : [{ key: keys.plan(id), value: state.lastRun }]),
+      ]),
 
     getRun: async () => {
       const run = await get(keys.run(), runSchema);
@@ -310,13 +356,27 @@ export function createStore(config: {
     },
 
     leave: async (id) => {
+      // The profile goes first, so writes that check for it stop at once.
+      await db.send(new DeleteCommand({ TableName, Key: keys.profile(id) }));
       const items = await query(keys.userItems(id).pk);
       const own = items.flatMap((item) =>
         typeof item.pk === "string" && typeof item.sk === "string"
           ? [{ DeleteRequest: { Key: { pk: item.pk, sk: item.sk } } }]
           : [],
       );
-      await batchWrite([...own, { DeleteRequest: { Key: keys.member(id) } }]);
+      const playlists = (
+        await query(keys.playlists().pk, keys.playlists().prefix)
+      ).flatMap((item) => {
+        const parsed = verdictSchema.safeParse(item);
+        return parsed.success && parsed.data.ownerId === id
+          ? [{ DeleteRequest: { Key: keys.playlist(parsed.data.playlistId) } }]
+          : [];
+      });
+      await batchWrite([
+        ...own,
+        ...playlists,
+        { DeleteRequest: { Key: keys.member(id) } },
+      ]);
     },
   };
 }

@@ -3,6 +3,9 @@ import { defaultSettings, type Settings } from "../../../shared/page-api";
 import { userIdSchema } from "../ids";
 import type { PlaylistSummary, SavedAlbum } from "../spotify/schemas";
 import {
+  albumKey,
+  approvedOnly,
+  emptyMemory,
   makePlan,
   type GroupPlaylist,
   type Library,
@@ -65,13 +68,12 @@ const verdict = (
 });
 
 const memory = (overrides: Partial<Memory> = {}): Memory => ({
-  savedAlbums: [],
-  playlists: [],
-  ignoredAlbums: [],
-  ignoredPlaylists: [],
-  ignoredPlaylistAlbums: [],
+  ...emptyMemory(),
+  reviewed: true,
   ...overrides,
 });
+
+const key = albumKey;
 
 function plan(options: {
   playlists?: PlaylistSummary[];
@@ -125,7 +127,13 @@ describe("saving the album behind a playlist", () => {
         match: "tracks",
       },
     ]);
-    expect(actions.save).toEqual(["spotify:album:A1"]);
+    expect(actions.save).toEqual([
+      {
+        albumId: "A1",
+        uri: "spotify:album:A1",
+        key: key("Bully – Lucky For You"),
+      },
+    ]);
   });
 
   it("does nothing when the album is already saved, by id or by name", () => {
@@ -144,6 +152,20 @@ describe("saving the album behind a playlist", () => {
       ],
     });
     expect(made.save).toEqual([]);
+  });
+
+  it("saves one edition when two playlists hold two editions of an album", () => {
+    const { plan: made } = plan({
+      playlists: [
+        playlist("P1", "Bully – Lucky For You"),
+        playlist("P2", "Bully – Lucky For You (copy)"),
+      ],
+      verdicts: [
+        verdict("P1", "A1", "Bully – Lucky For You"),
+        verdict("P2", "A1deluxe", "Bully – Lucky For You"),
+      ],
+    });
+    expect(made.save.map((entry) => entry.albumId)).toEqual(["A1"]);
   });
 
   it("leaves a partial or mixed playlist alone, and lists it for a look", () => {
@@ -222,6 +244,16 @@ describe("making a playlist for a saved album", () => {
       "A1",
       "A2",
     ]);
+  });
+
+  it("makes one playlist when two editions of an album are saved", () => {
+    const { plan: made } = plan({
+      saved: [
+        saved("A1", "Bully", "Lucky For You", "2025-05-01T00:00:00Z"),
+        saved("A1deluxe", "Bully", "Lucky For You", "2025-06-01T00:00:00Z"),
+      ],
+    });
+    expect(made.create.map((entry) => entry.albumId)).toEqual(["A1"]);
   });
 
   it("names it album first when the person asked for that", () => {
@@ -326,8 +358,9 @@ describe("following the group's album playlists", () => {
 });
 
 describe("what the person removed", () => {
-  it("marks the first plan, which always waits for review", () => {
+  it("is first until the person has applied once", () => {
     expect(plan({ memory: undefined }).plan.first).toBe(true);
+    expect(plan({ memory: memory({ reviewed: false }) }).plan.first).toBe(true);
     expect(plan({}).plan.first).toBe(false);
   });
 
@@ -335,40 +368,87 @@ describe("what the person removed", () => {
     const { plan: made, memory: next } = plan({
       playlists: [playlist("P1", "Bully – Lucky For You")],
       verdicts: [verdict("P1", "A1", "Bully – Lucky For You")],
-      memory: memory({ savedAlbums: ["A1"], playlists: ["P1"] }),
+      memory: memory({
+        saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+        playlists: [{ id: "P1", albumKey: key("Bully – Lucky For You") }],
+      }),
     });
     expect(made.save).toEqual([]);
-    expect(next.ignoredAlbums).toEqual(["A1"]);
+    expect(next.ignoredAlbumKeys).toEqual([key("Bully – Lucky For You")]);
     expect(made.ignored.albums).toBe(1);
   });
 
-  it("forgets the album once the person saves it again", () => {
+  it("never saves another edition of an album the person unsaved", () => {
+    const { plan: made } = plan({
+      playlists: [playlist("P2", "Bully – Lucky For You (deluxe)", "matt")],
+      verdicts: [verdict("P2", "A1deluxe", "Bully – Lucky For You")],
+      memory: memory({
+        saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+      }),
+    });
+    expect(made.save).toEqual([]);
+  });
+
+  it("does not count swapping one edition for another as a removal", () => {
+    const { memory: next } = plan({
+      saved: [
+        saved("A1deluxe", "Bully", "Lucky For You", "2026-01-01T00:00:00Z"),
+      ],
+      memory: memory({
+        saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+      }),
+    });
+    expect(next.ignoredAlbumKeys).toEqual([]);
+  });
+
+  it("forgets the removal once the person saves the album again", () => {
     const { memory: next } = plan({
       saved: [saved("A1", "Bully", "Lucky For You", "2026-01-01T00:00:00Z")],
-      playlists: [playlist("P1", "Bully – Lucky For You")],
-      verdicts: [verdict("P1", "A1", "Bully – Lucky For You")],
-      memory: memory({ ignoredAlbums: ["A1"], playlists: ["P1"] }),
+      memory: memory({ ignoredAlbumKeys: [key("Bully – Lucky For You")] }),
     });
-    expect(next.ignoredAlbums).toEqual([]);
+    expect(next.ignoredAlbumKeys).toEqual([]);
   });
 
   it("never follows again a playlist the person unfollowed", () => {
     const { plan: made } = plan({
       group: [shared("M1", "B1", "Cable Ties – All Her Plans")],
-      verdicts: [
-        verdict("M1", "B1", "Cable Ties – All Her Plans", { ownerId: "matt" }),
-      ],
-      memory: memory({ playlists: ["M1"] }),
+      memory: memory({
+        playlists: [{ id: "M1", albumKey: key("Cable Ties – All Her Plans") }],
+      }),
     });
     expect(made.follow).toEqual([]);
     expect(made.ignored.playlists).toBe(1);
   });
 
+  it("does not follow a playlist of an album the person unsaved", () => {
+    const { plan: made } = plan({
+      group: [shared("M1", "B1", "Cable Ties – All Her Plans")],
+      memory: memory({
+        saved: [{ id: "B1", key: key("Cable Ties – All Her Plans") }],
+      }),
+    });
+    expect(made.follow).toEqual([]);
+  });
+
   it("never makes a playlist again for an album whose playlist the person removed", () => {
     const { plan: made } = plan({
       saved: [saved("A1", "Bully", "Lucky For You", "2026-01-01T00:00:00Z")],
-      verdicts: [verdict("P1", "A1", "Bully – Lucky For You")],
-      memory: memory({ savedAlbums: ["A1"], playlists: ["P1"] }),
+      memory: memory({
+        saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+        playlists: [{ id: "P1", albumKey: key("Bully – Lucky For You") }],
+      }),
+    });
+    expect(made.create).toEqual([]);
+  });
+
+  it("does the same when the removed playlist held another edition", () => {
+    const { plan: made } = plan({
+      saved: [saved("A1", "Bully", "Lucky For You", "2026-01-01T00:00:00Z")],
+      memory: memory({
+        saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+        playlists: [{ id: "P1", albumKey: key("Bully – Lucky For You") }],
+      }),
+      verdicts: [verdict("P1", "A1deluxe", "Bully – Lucky For You")],
     });
     expect(made.create).toEqual([]);
   });
@@ -380,6 +460,63 @@ describe("what the person removed", () => {
       saved: [saved("A1", "Bully", "Lucky For You", "2026-01-01T00:00:00Z")],
       memory: undefined,
     });
-    expect(next).toEqual(memory({ savedAlbums: ["A1"], playlists: ["P1"] }));
+    expect(next).toEqual({
+      ...emptyMemory(),
+      saved: [{ id: "A1", key: key("Bully – Lucky For You") }],
+      playlists: [{ id: "P1", albumKey: key("Bully – Lucky For You") }],
+    });
+  });
+});
+
+describe("half-made playlists", () => {
+  const unfinished = {
+    playlistId: "N1",
+    albumId: "A1",
+    albumLabel: "Bully – Lucky For You",
+    name: "Bully – Lucky For You",
+  };
+
+  it("plans to finish a playlist spotimy made and could not fill", () => {
+    const { plan: made, actions } = plan({
+      playlists: [playlist("N1", "Bully – Lucky For You")],
+      saved: [saved("A1", "Bully", "Lucky For You", "2026-01-01T00:00:00Z")],
+      memory: memory({ unfinished: [unfinished] }),
+    });
+    expect(made.finish).toEqual([
+      { playlistId: "N1", name: "Bully – Lucky For You" },
+    ]);
+    expect(actions.finish).toEqual([unfinished]);
+    expect(made.create).toEqual([]);
+  });
+
+  it("drops it if the person deleted it", () => {
+    const { plan: made, memory: next } = plan({
+      memory: memory({ unfinished: [unfinished] }),
+    });
+    expect(made.finish).toEqual([]);
+    expect(next.unfinished).toEqual([]);
+  });
+});
+
+describe("applying only what the person saw", () => {
+  it("keeps the actions in the approved plan and drops anything new", () => {
+    const now = plan({
+      saved: [
+        saved("A1", "Bully", "Lucky For You", "2025-05-01T00:00:00Z"),
+        saved("A2", "Iceage", "Seek Shelter", "2026-03-01T00:00:00Z"),
+      ],
+      group: [
+        shared("M1", "B1", "Cable Ties – All Her Plans"),
+        shared("M2", "B2", "The Smile – Wall of Eyes"),
+      ],
+    });
+    const seen = plan({
+      saved: [saved("A1", "Bully", "Lucky For You", "2025-05-01T00:00:00Z")],
+      group: [shared("M1", "B1", "Cable Ties – All Her Plans")],
+    }).plan;
+    const kept = approvedOnly(now.actions, seen);
+    expect(kept.create.map((entry) => entry.saved.album.id)).toEqual(["A1"]);
+    expect(kept.follow.map((entry) => entry.playlistId)).toEqual(["M1"]);
+    expect(kept.save.map((entry) => entry.albumId)).toEqual(["B1"]);
   });
 });

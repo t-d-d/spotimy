@@ -17,7 +17,7 @@ A group of up to five Spotify accounts, the most a Spotify app in development mo
    - follow each album playlist another member owns that this person has no playlist for, and save its album,
    - make a playlist, "Artist – Album", for each saved album with no playlist, and say which year folder it belongs in.
 4. **Show the plan** on a page, with what was left alone and why: playlists of several albums, partial albums, and names that matched nothing.
-5. **Apply** when the person presses Apply, or each morning if they turned that on. A person's first plan always waits for them.
+5. **Apply** what the plan on the page says when the person presses Apply, and nothing that turned up since. Each morning, apply the whole plan for anyone who turned that on and has pressed Apply once themselves.
 6. **Never take anything away.** A run only saves, follows and makes. Something a person removed after a run is never put back.
 7. **Leave.** A person can leave, and spotimy forgets their tokens and everything it kept about them.
 

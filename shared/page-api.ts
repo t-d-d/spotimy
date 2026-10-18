@@ -33,7 +33,8 @@ export const reviewKinds = [
 ] as const;
 
 export const planSchema = z.object({
-  // The person's first plan, which always waits for review.
+  // True until the person has pressed Apply once. Until then nothing is
+  // applied for them without that press.
   first: z.boolean(),
   save: z.array(
     z.object({
@@ -59,6 +60,8 @@ export const planSchema = z.object({
       year: z.string(),
     }),
   ),
+  // Playlists spotimy made whose tracks did not all go in.
+  finish: z.array(z.object({ playlistId: z.string(), name: z.string() })),
   review: z.array(
     z.object({
       playlist: z.string(),
@@ -77,7 +80,10 @@ export const appliedSchema = z.object({
   saved: count,
   followed: count,
   created: z.array(z.object({ name: z.string(), year: z.string() })),
+  finished: count,
   failed: count,
+  // Spotify asked spotimy to stop before it was done.
+  unfinished: z.boolean(),
 });
 
 export type Applied = z.infer<typeof appliedSchema>;
@@ -112,6 +118,18 @@ export const statusSchema = z.object({
 export type Status = z.infer<typeof statusSchema>;
 
 // Why the API refused a request the page made.
-export const refusalSchema = z.object({
-  error: z.enum(["signed-out", "busy", "invalid", "origin"]),
-});
+// An apply names the plan the person saw, by the run that made it, so a plan
+// that changed since is not applied unseen (sync-safety.md).
+export const applyRequestSchema = z.object({ plan: z.string().min(1) });
+
+export const refusals = [
+  "signed-out",
+  "busy",
+  "changed",
+  "invalid",
+  "origin",
+] as const;
+
+export const refusalSchema = z.object({ error: z.enum(refusals) });
+
+export type Refusal = (typeof refusals)[number];

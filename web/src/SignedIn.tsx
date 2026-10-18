@@ -1,6 +1,14 @@
 import { useState } from "react";
 import type { Settings, Status } from "../../shared/page-api";
-import { Busy, leave, saveSettings, signOut, startRun } from "./api";
+import {
+  Busy,
+  Changed,
+  leave,
+  saveSettings,
+  signOut,
+  startApply,
+  startCheck,
+} from "./api";
 import styles from "./Page.module.css";
 import { PlanView } from "./PlanView";
 import { SettingsForm } from "./SettingsForm";
@@ -26,9 +34,11 @@ export function SignedIn({ status, show, reload }: Props) {
       show(await action());
     } catch (error) {
       setProblem(
-        error instanceof Busy
-          ? "A run is already going. This page updates when it finishes."
-          : "That did not work. Try again in a minute.",
+        error instanceof Changed
+          ? "Your plan changed while this page was open. Look it over again, then press Apply."
+          : error instanceof Busy
+            ? "A run is already going. This page updates when it finishes."
+            : "That did not work. Try again in a minute.",
       );
       await reload();
     }
@@ -100,7 +110,9 @@ export function SignedIn({ status, show, reload }: Props) {
             type="button"
             className={styles.primary}
             disabled={!idle || last === null || !hasWork(last.plan)}
-            onClick={() => void act(() => startRun("apply"))}
+            onClick={() => {
+              if (last !== null) void act(() => startApply(last.runId));
+            }}
           >
             Apply these changes
           </button>
@@ -108,7 +120,7 @@ export function SignedIn({ status, show, reload }: Props) {
             type="button"
             className={styles.secondary}
             disabled={!idle}
-            onClick={() => void act(() => startRun("check"))}
+            onClick={() => void act(startCheck)}
           >
             Check now
           </button>

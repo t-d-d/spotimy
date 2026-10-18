@@ -49,6 +49,7 @@ const status = (overrides: Partial<Status> = {}): Status => ({
           year: "2025",
         },
       ],
+      finish: [],
       review: [
         { playlist: "Road trip", kind: "mixed", detail: "No one album." },
       ],
@@ -100,7 +101,7 @@ describe("signed out", () => {
 });
 
 describe("signed in", () => {
-  it("shows the plan, and says the first one waits for Apply", async () => {
+  it("shows the plan, and says nothing changes until Apply", async () => {
     const { page } = await openPage(
       "/",
       answering({ "GET /api/status": () => ({ status: 200, body: status() }) }),
@@ -116,7 +117,9 @@ describe("signed in", () => {
         .count(),
     ).toBe(1);
     expect(
-      await page.getByText("Nothing changes until you press Apply.").count(),
+      await page
+        .getByText("Nothing changes in your library until you press Apply.")
+        .count(),
     ).toBe(1);
   });
 
@@ -140,12 +143,27 @@ describe("signed in", () => {
     );
     await page.getByRole("button", { name: "Apply these changes" }).click();
     await page.getByText("Applying your changes…").waitFor();
-    expect(calls.map((call) => `${call.method} ${call.path}`)).toContain(
-      "POST /api/apply",
-    );
+    // It names the plan on show, so only what the person saw is applied.
+    expect(calls.find((call) => call.path === "/api/apply")?.body).toEqual({
+      plan: "run00000001",
+    });
     expect(
       await page.getByRole("button", { name: "Check now" }).isDisabled(),
     ).toBe(true);
+  });
+
+  it("says so when the plan changed while the page was open", async () => {
+    const { page } = await openPage(
+      "/",
+      answering({
+        "GET /api/status": () => ({ status: 200, body: status() }),
+        "POST /api/apply": () => ({ status: 409, body: { error: "changed" } }),
+      }),
+    );
+    await page.getByRole("button", { name: "Apply these changes" }).click();
+    expect(await page.getByRole("alert").textContent()).toContain(
+      "Your plan changed while this page was open.",
+    );
   });
 
   it("asks again while a run goes, and shows the result when it ends", async () => {
@@ -218,6 +236,7 @@ describe("signed in", () => {
         save: [],
         follow: [],
         create: [],
+        finish: [],
       };
     }
     const { page } = await openPage(

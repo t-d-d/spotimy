@@ -89,8 +89,8 @@ functions:
       - schedule: cron(30 5 * * ? *)
 
 resources:
-  # Every route shares one allowance. A request over it gets API Gateway's
-  # own 429 and starts no function. This block takes the place of the
+  # Each route gets this allowance. A request over it gets API Gateway's own
+  # 429 and starts no function. This block takes the place of the
   # framework's DefaultRouteSettings whole, so it repeats the one setting the
   # framework writes there.
   extensions:

@@ -1,13 +1,15 @@
-// Carries out a plan's actions. It only adds (sync-safety.md).
+// Carries out a plan's actions. It only adds (sync-safety.md). Each change
+// is recorded as soon as Spotify takes it, so a run that stops partway, for
+// any reason, still remembers what it did.
 import type { UserId } from "../ids";
 import type { Logger } from "../log";
 import { errorClass } from "../log";
 import { RateLimited, type SpotifyClient } from "../spotify/client";
 import {
   createdPlaylistSchema,
+  playlistEntrySchema,
   simpleTrackSchema,
   snapshotSchema,
-  type SavedAlbum,
 } from "../spotify/schemas";
 import { label } from "./names";
 import type { Actions } from "./plan";
@@ -22,133 +24,253 @@ const chunk = <T>(items: T[], size: number): T[][] =>
     items.slice(index * size, index * size + size),
   );
 
+export type Change =
+  | { kind: "saved"; albumId: string; key: string }
+  | { kind: "followed"; playlistId: string; albumKey: string }
+  // A playlist made, before its tracks go in.
+  | {
+      kind: "made";
+      playlistId: string;
+      albumId: string;
+      albumLabel: string;
+      name: string;
+    }
+  // A playlist spotimy made now holds its album.
+  | { kind: "filled"; playlistId: string; verdict: Verdict };
+
 export interface Outcome {
-  saved: string[];
-  followed: string[];
-  created: {
-    playlistId: string;
-    name: string;
-    year: string;
-    verdict: Verdict;
-  }[];
+  saved: number;
+  followed: number;
+  created: { name: string; year: string }[];
+  finished: number;
   failed: number;
-  // Set when Spotify asked for a long wait, which stops the rest.
-  rateLimited: number | null;
+  // Why it stopped early, if it did.
+  stopped:
+    | { reason: "rate-limited"; retryAfter: number }
+    | { reason: "out-of-time" }
+    | null;
 }
 
 async function albumTrackUris(
   client: SpotifyClient,
-  saved: SavedAlbum,
+  albumId: string,
 ): Promise<string[]> {
-  const { album } = saved;
-  const first = album.tracks;
-  const uris = (first?.items ?? []).flatMap((track) =>
-    track === null || track.is_local === true ? [] : [track.uri],
-  );
-  const next =
-    first === undefined
-      ? `/albums/${album.id}/tracks?limit=50&market=from_token`
-      : first.next;
-  if (next !== null) {
-    for await (const track of client.pages(next, simpleTrackSchema)) {
-      if (track.is_local !== true) uris.push(track.uri);
-    }
+  const uris: string[] = [];
+  for await (const track of client.pages(
+    `/albums/${albumId}/tracks?limit=50&market=from_token`,
+    simpleTrackSchema,
+  )) {
+    if (track.is_local !== true) uris.push(track.uri);
   }
   return uris;
 }
+
+async function playlistTrackUris(
+  client: SpotifyClient,
+  playlistId: string,
+): Promise<Set<string>> {
+  const uris = new Set<string>();
+  for await (const entry of client.pages(
+    `/playlists/${playlistId}/items?limit=50&market=from_token&additional_types=track`,
+    playlistEntrySchema,
+  )) {
+    const track = entry.item ?? entry.track;
+    if (track !== null && track !== undefined) uris.add(track.uri);
+  }
+  return uris;
+}
+
+async function addTracks(
+  client: SpotifyClient,
+  playlistId: string,
+  uris: string[],
+  snapshot: string,
+): Promise<string> {
+  let latest = snapshot;
+  for (const batch of chunk(uris, itemsBatch)) {
+    latest = (
+      await client.post(
+        `/playlists/${playlistId}/items`,
+        { uris: batch },
+        snapshotSchema,
+      )
+    ).snapshot_id;
+  }
+  return latest;
+}
+
+const filledVerdict = (
+  playlistId: string,
+  ownerId: UserId,
+  snapshot: string,
+  album: { id: string; uri: string; label: string; tracks: number },
+  matched: number,
+): Verdict => ({
+  playlistId,
+  snapshot,
+  ownerId,
+  method: "tracks",
+  albumId: album.id,
+  albumUri: album.uri,
+  albumLabel: album.label,
+  purity: 1,
+  coverage: Math.min(1, matched / Math.max(1, album.tracks)),
+  matched,
+  albumTracks: album.tracks,
+});
 
 export async function applyActions(config: {
   client: SpotifyClient;
   userId: UserId;
   actions: Actions;
   privatePlaylists: boolean;
+  // Whether there is time for one more change before the function's limit.
+  hasTime: () => boolean;
+  record: (change: Change) => Promise<void>;
   log: Logger;
 }): Promise<Outcome> {
-  const { client, actions, log, userId } = config;
+  const { client, actions, log, userId, record, hasTime } = config;
   const outcome: Outcome = {
-    saved: [],
-    followed: [],
+    saved: 0,
+    followed: 0,
     created: [],
+    finished: 0,
     failed: 0,
-    rateLimited: null,
+    stopped: null,
+  };
+
+  // Each step runs alone, so one failure costs only its own change. A long
+  // wait from Spotify, or the end of the function's time, stops the rest.
+  const step = async (
+    work: () => Promise<void>,
+    size = 1,
+  ): Promise<boolean> => {
+    if (!hasTime()) {
+      outcome.stopped = { reason: "out-of-time" };
+      return false;
+    }
+    try {
+      await work();
+      return true;
+    } catch (error) {
+      if (error instanceof RateLimited) {
+        outcome.stopped = {
+          reason: "rate-limited",
+          retryAfter: error.retryAfter,
+        };
+        return false;
+      }
+      outcome.failed += size;
+      log.warn("apply-failed", { userId, errorClass: errorClass(error) });
+      return true;
+    }
   };
 
   // Saving an album and following a playlist are the same call.
   const uris = [
-    ...actions.save.map((uri) => ({ uri, kind: "album" as const })),
-    ...actions.follow.map((playlist) => ({
-      uri: `spotify:playlist:${playlist.playlistId}`,
-      kind: "playlist" as const,
+    ...actions.save.map((entry) => ({
+      uri: entry.uri,
+      change: {
+        kind: "saved" as const,
+        albumId: entry.albumId,
+        key: entry.key,
+      },
+    })),
+    ...actions.follow.map((entry) => ({
+      uri: `spotify:playlist:${entry.playlistId}`,
+      change: {
+        kind: "followed" as const,
+        playlistId: entry.playlistId,
+        albumKey: entry.key,
+      },
     })),
   ];
   for (const batch of chunk(uris, libraryBatch)) {
-    try {
+    const going = await step(async () => {
       await client.put(
         `/me/library?uris=${encodeURIComponent(batch.map((entry) => entry.uri).join(","))}`,
       );
-      for (const entry of batch) {
-        const id = entry.uri.split(":")[2] ?? "";
-        if (entry.kind === "album") outcome.saved.push(id);
-        else outcome.followed.push(id);
+      for (const { change } of batch) {
+        await record(change);
+        if (change.kind === "saved") outcome.saved += 1;
+        else outcome.followed += 1;
       }
-    } catch (error) {
-      if (error instanceof RateLimited) {
-        outcome.rateLimited = error.retryAfter;
-        return outcome;
-      }
-      outcome.failed += batch.length;
-      log.warn("apply-failed", { userId, errorClass: errorClass(error) });
-    }
+    }, batch.length);
+    if (!going) return outcome;
+  }
+
+  for (const entry of actions.finish) {
+    const going = await step(async () => {
+      const album = await albumTrackUris(client, entry.albumId);
+      const present = await playlistTrackUris(client, entry.playlistId);
+      const missing = album.filter((uri) => !present.has(uri));
+      const snapshot = await addTracks(client, entry.playlistId, missing, "");
+      await record({
+        kind: "filled",
+        playlistId: entry.playlistId,
+        verdict: filledVerdict(
+          entry.playlistId,
+          userId,
+          snapshot,
+          {
+            id: entry.albumId,
+            uri: `spotify:album:${entry.albumId}`,
+            label: entry.albumLabel,
+            tracks: album.length,
+          },
+          album.length,
+        ),
+      });
+      outcome.finished += 1;
+    });
+    if (!going) return outcome;
   }
 
   for (const { saved, name } of actions.create) {
-    try {
-      const uris = await albumTrackUris(client, saved);
-      if (uris.length === 0) continue;
+    const going = await step(async () => {
+      const { album } = saved;
+      const tracks = await albumTrackUris(client, album.id);
+      if (tracks.length === 0) return;
       const playlist = await client.post(
         "/me/playlists",
         { name, public: !config.privatePlaylists },
         createdPlaylistSchema,
       );
-      let snapshot = playlist.snapshot_id;
-      for (const batch of chunk(uris, itemsBatch)) {
-        snapshot = (
-          await client.post(
-            `/playlists/${playlist.id}/items`,
-            { uris: batch },
-            snapshotSchema,
-          )
-        ).snapshot_id;
-      }
-      outcome.created.push({
+      // Recorded before its tracks go in, so a half-made playlist is
+      // finished later rather than left empty.
+      await record({
+        kind: "made",
         playlistId: playlist.id,
+        albumId: album.id,
+        albumLabel: label(album),
         name,
-        year: saved.added_at.slice(0, 4),
-        verdict: {
-          playlistId: playlist.id,
-          snapshot,
-          ownerId: userId,
-          method: "tracks",
-          albumId: saved.album.id,
-          albumUri: saved.album.uri,
-          albumLabel: label(saved.album),
-          purity: 1,
-          coverage: Math.min(
-            1,
-            uris.length / Math.max(1, saved.album.total_tracks),
-          ),
-          matched: uris.length,
-          albumTracks: saved.album.total_tracks,
-        },
       });
-    } catch (error) {
-      if (error instanceof RateLimited) {
-        outcome.rateLimited = error.retryAfter;
-        return outcome;
-      }
-      outcome.failed += 1;
-      log.warn("apply-failed", { userId, errorClass: errorClass(error) });
-    }
+      const snapshot = await addTracks(
+        client,
+        playlist.id,
+        tracks,
+        playlist.snapshot_id,
+      );
+      const year = saved.added_at.slice(0, 4);
+      await record({
+        kind: "filled",
+        playlistId: playlist.id,
+        verdict: filledVerdict(
+          playlist.id,
+          userId,
+          snapshot,
+          {
+            id: album.id,
+            uri: album.uri,
+            label: label(album),
+            tracks: album.total_tracks,
+          },
+          tracks.length,
+        ),
+      });
+      outcome.created.push({ name, year });
+    });
+    if (!going) return outcome;
   }
   return outcome;
 }

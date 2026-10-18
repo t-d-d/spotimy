@@ -17,7 +17,7 @@ export function PlanView({ plan }: { plan: Plan }) {
       </h2>
       {plan.first && hasWork(plan) ? (
         <p className={styles.note}>
-          This is your first plan. Nothing changes until you press Apply.
+          Nothing changes in your library until you press Apply.
         </p>
       ) : null}
 
@@ -68,6 +68,22 @@ export function PlanView({ plan }: { plan: Plan }) {
               <li key={year}>
                 <strong>{year}</strong>: {names.join(", ")}
               </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {plan.finish.length === 0 ? null : (
+        <details>
+          <summary className={styles.summary}>
+            Playlists to finish ({plan.finish.length})
+          </summary>
+          <p className={styles.meta}>
+            spotimy made these but could not add all their tracks.
+          </p>
+          <ul className={styles.list}>
+            {plan.finish.map((entry) => (
+              <li key={entry.playlistId}>{entry.name}</li>
             ))}
           </ul>
         </details>

@@ -44,13 +44,13 @@ export interface ClientOptions {
   sleep?: (ms: number) => Promise<void>;
   // The gap kept between two calls.
   gapMs?: number;
-  // The longest Retry-After a call waits through before giving up.
+  // The most one call waits through, over all its tries, before giving up,
+  // so a run always has time left to save what it did.
   maxWaitSeconds?: number;
 }
 
 export const defaultGapMs = 120;
-export const defaultMaxWaitSeconds = 20;
-const maxTries = 6;
+export const defaultMaxWaitSeconds = 45;
 
 const realSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -83,6 +83,7 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
     const url = urlOf(path);
     const what = `${method} ${new URL(url).pathname}`;
     let renewed = false;
+    let waited = 0;
     for (let attempt = 1; ; attempt += 1) {
       const wait = lastCall + gapMs - Date.now();
       if (wait > 0) await sleep(wait);
@@ -113,11 +114,12 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
           1,
           Math.ceil(Number(response.headers.get("retry-after") ?? "5") || 5),
         );
-        if (retryAfter > maxWaitSeconds || attempt >= maxTries) {
+        if (waited + retryAfter + 1 > maxWaitSeconds) {
           log.warn("spotify-rate-limited", { retryAfter });
           throw new RateLimited(retryAfter);
         }
         log.info("spotify-retried", { status: 429, retryAfter });
+        waited += retryAfter + 1;
         await sleep((retryAfter + 1) * 1000);
         continue;
       }

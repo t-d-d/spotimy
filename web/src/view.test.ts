@@ -32,10 +32,24 @@ const last = (applied: LastRun["applied"]): LastRun => ({
     save: [],
     follow: [],
     create: [],
+    finish: [],
     review: [],
     ignored: { albums: 0, playlists: 0 },
   },
   applied,
+});
+
+const applied = (
+  overrides: Partial<NonNullable<LastRun["applied"]>>,
+): NonNullable<LastRun["applied"]> => ({
+  at: "2026-10-18T05:31:00Z",
+  saved: 0,
+  followed: 0,
+  created: [],
+  finished: 0,
+  failed: 0,
+  unfinished: false,
+  ...overrides,
 });
 
 describe("what the page says", () => {
@@ -69,7 +83,7 @@ describe("what the page says", () => {
         now,
       ),
     ).toMatch(
-      /^Spotify asked spotimy to wait\. The next run can start today at .+, and picks up where this one stopped\.$/u,
+      /^Spotify asked spotimy to wait until today at .+\. What it found so far is kept\.$/u,
     );
   });
 
@@ -77,29 +91,26 @@ describe("what the page says", () => {
     expect(appliedLine(last(null), now)).toBeUndefined();
     expect(
       appliedLine(
-        last({
-          at: "2026-10-18T05:31:00Z",
-          saved: 3,
-          followed: 1,
-          created: [{ name: "x", year: "2026" }],
-          failed: 0,
-        }),
-        now,
-      ),
-    ).toMatch(/: saved 3 albums, followed 1 playlist, made 1 playlist\.$/u);
-    expect(
-      appliedLine(
-        last({
-          at: "2026-10-18T05:31:00Z",
-          saved: 0,
-          followed: 0,
-          created: [],
-          failed: 2,
-        }),
+        last(
+          applied({
+            saved: 3,
+            followed: 1,
+            created: [{ name: "x", year: "2026" }],
+            finished: 2,
+          }),
+        ),
         now,
       ),
     ).toMatch(
-      /nothing needed changing\. 2 changes failed, and the next run tries again\.$/u,
+      /: saved 3 albums, followed 1 playlist, made 1 playlist, finished 2 playlists\.$/u,
+    );
+    expect(appliedLine(last(applied({ failed: 2 })), now)).toMatch(
+      /nothing needed changing\. 2 changes failed\. They are in the plan again\.$/u,
+    );
+    expect(
+      appliedLine(last(applied({ saved: 1, unfinished: true })), now),
+    ).toMatch(
+      /saved 1 album\. Spotify asked spotimy to stop before it was done\. Press Apply again later for the rest\.$/u,
     );
   });
 

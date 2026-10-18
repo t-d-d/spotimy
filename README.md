@@ -13,9 +13,9 @@ Before Spotify let you save albums, the way to keep one was a playlist. Thomas a
 1. **Read.** Each member's playlists and saved albums, with their own Spotify token.
 2. **Identify.** What each playlist is. A member's own playlist is read track by track. A playlist from outside the group, whose tracks Spotify hides from apps, is matched by its name, then confirmed by its cover art: a playlist of one album shows that album's own cover. Each answer is cached by the playlist's snapshot, so an unchanged playlist is never read twice.
 3. **Plan.** For each person: albums to save, the group's album playlists to follow, and playlists to make for saved albums that have none.
-4. **Apply.** When the person presses Apply, or each morning if they turned that on. A first plan always waits.
+4. **Apply.** When the person presses Apply, only what the plan on their page said. Each morning, for anyone who turned that on after pressing Apply once themselves.
 
-A run only adds. It never removes, unfollows or unsaves anything, and it never puts back what someone removed ([sync-safety.md](docs/constraints/sync-safety.md)).
+A run only adds. It never removes, unfollows or unsaves anything, and it never puts back what someone removed, in any edition of the album ([sync-safety.md](docs/constraints/sync-safety.md)).
 
 Spotify's Web API has no access to playlist folders, so new and followed playlists land at the top of the library. The page lists them by year, and each person drags them into place.
 

@@ -22,6 +22,8 @@ export const events = [
   "library-read",
   "playlists-identified",
   "plan-made",
+  // An apply named a plan that has since been replaced, so it did nothing.
+  "apply-refused",
   "changes-applied",
   "apply-failed",
   "token-refresh-failed",

@@ -22,14 +22,18 @@ export function runLine(status: Status, now: Date): string {
       : "Checking everyone's libraries…";
   }
   if (run.state === "paused" && run.retryAt !== null) {
-    return `Spotify asked spotimy to wait. The next run can start ${time(run.retryAt, now)}, and picks up where this one stopped.`;
+    return `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept.`;
   }
   if (last === null) return "Not checked yet.";
   return `Last checked ${time(last.madeAt, now)}.`;
 }
 
 export const hasWork = (plan: Plan): boolean =>
-  plan.save.length + plan.follow.length + plan.create.length > 0;
+  plan.save.length +
+    plan.follow.length +
+    plan.create.length +
+    plan.finish.length >
+  0;
 
 const plural = (count: number, one: string, many: string) =>
   `${String(count)} ${count === 1 ? one : many}`;
@@ -47,14 +51,20 @@ export function appliedLine(last: LastRun, now: Date): string | undefined {
     applied.created.length > 0
       ? `made ${plural(applied.created.length, "playlist", "playlists")}`
       : "",
+    applied.finished > 0
+      ? `finished ${plural(applied.finished, "playlist", "playlists")}`
+      : "",
   ].filter((part) => part !== "");
   const done =
     parts.length === 0 ? "nothing needed changing" : parts.join(", ");
   const failed =
     applied.failed > 0
-      ? ` ${plural(applied.failed, "change", "changes")} failed, and the next run tries again.`
+      ? ` ${plural(applied.failed, "change", "changes")} failed. They are in the plan again.`
       : "";
-  return `Applied ${time(applied.at, now)}: ${done}.${failed}`;
+  const unfinished = applied.unfinished
+    ? " Spotify asked spotimy to stop before it was done. Press Apply again later for the rest."
+    : "";
+  return `Applied ${time(applied.at, now)}: ${done}.${failed}${unfinished}`;
 }
 
 // New playlists by the year folder each belongs in, newest year first.

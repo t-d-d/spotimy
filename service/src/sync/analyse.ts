@@ -45,14 +45,13 @@ const fromAlbum = (
 export async function analyseTracks(
   client: SpotifyClient,
   playlist: PlaylistSummary,
-  endpoint: "items" | "tracks" = "items",
 ): Promise<Verdict> {
   interface Group {
     tracks: Set<string>;
     byId: Map<string, { album: Album; count: number }>;
   }
   const groups = new Map<string, Group>();
-  const path = `/playlists/${playlist.id}/${endpoint}?limit=50&market=from_token&additional_types=track`;
+  const path = `/playlists/${playlist.id}/items?limit=50&market=from_token&additional_types=track`;
   for await (const entry of client.pages(path, playlistEntrySchema)) {
     const track = entry.item ?? entry.track;
     if (track === null || track === undefined) continue;
@@ -149,51 +148,39 @@ export async function identifyByName(
 }
 
 // A development-mode app made since February 2026 cannot read the tracks of
-// a playlist its user does not own. One made before may still. This tries
-// once per run and remembers the answer.
+// a playlist its user does not own. One made before may still. This tries,
+// and after a refusal, or three empty answers in a row, stops trying for the
+// rest of the run. Only the documented /items endpoint is used.
 export function createFollowedReader(onUnreadable: () => void) {
-  let endpoint: "items" | "tracks" | "none" | undefined;
-  let emptyTries = 0;
-  const attempt = async (
-    client: SpotifyClient,
-    playlist: PlaylistSummary,
-    which: "items" | "tracks",
-  ): Promise<Verdict | undefined> => {
-    try {
-      return await analyseTracks(client, playlist, which);
-    } catch (error) {
-      if (
-        error instanceof SpotifyError &&
-        (error.status === 403 || error.status === 404)
-      ) {
-        return undefined;
-      }
-      throw error;
-    }
+  let readable = true;
+  let emptyInARow = 0;
+  const stop = () => {
+    readable = false;
+    onUnreadable();
   };
   return async (
     client: SpotifyClient,
     playlist: PlaylistSummary,
   ): Promise<Verdict | undefined> => {
-    if (endpoint === "none") return undefined;
-    if (endpoint !== undefined) {
-      const verdict = await attempt(client, playlist, endpoint);
-      return verdict !== undefined && verdict.matched > 0 ? verdict : undefined;
-    }
-    for (const which of ["items", "tracks"] as const) {
-      const verdict = await attempt(client, playlist, which);
-      if (verdict === undefined) continue;
-      if (verdict.matched > 0) {
-        endpoint = which;
-        return verdict;
+    if (!readable) return undefined;
+    let verdict: Verdict;
+    try {
+      verdict = await analyseTracks(client, playlist);
+    } catch (error) {
+      if (error instanceof SpotifyError && error.status === 403) {
+        stop();
+        return undefined;
       }
-      // An answer that is always empty is Spotify withholding the contents.
-      emptyTries += 1;
-      if (emptyTries < 3) return undefined;
-      break;
+      // Any other refusal is about this playlist alone.
+      if (error instanceof SpotifyError && error.status < 500) return undefined;
+      throw error;
     }
-    endpoint = "none";
-    onUnreadable();
+    if (verdict.matched > 0) {
+      emptyInARow = 0;
+      return verdict;
+    }
+    emptyInARow += 1;
+    if (emptyInARow >= 3) stop();
     return undefined;
   };
 }

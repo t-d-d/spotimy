@@ -218,33 +218,82 @@ describe("the page's API", () => {
     expect(bad.statusCode).toBe(400);
   });
 
-  it("starts a check or an apply in the worker, and says the group is busy while one runs", async () => {
+  it("starts a check in the worker, holding the group's run so a second press is told it is busy", async () => {
     const session = await signIn("thomas");
-    const started = await call("POST", "/api/apply", { cookies: [session] });
+    const started = await call("POST", "/api/check", { cookies: [session] });
     expect(started.statusCode).toBe(202);
     expect(lambda.invoked).toEqual([
-      expect.objectContaining({ kind: "apply", requestedBy: "thomas", hop: 0 }),
+      expect.objectContaining({
+        kind: "check",
+        requestedBy: "thomas",
+        hop: 0,
+        approved: null,
+      }),
     ]);
-    expect(statusSchema.parse(JSON.parse(started.body)).run.state).toBe(
-      "running",
-    );
-
-    const { store } = ready();
-    await store.takeRun(
-      {
-        runId: "otherrun0001",
-        job: "check",
-        requestedBy: null,
-        state: "running",
-        startedAt: new Date().toISOString(),
-        retryAt: null,
-        expiresAt: Math.floor(Date.now() / 1000) + 600,
-      },
-      new Date(),
-    );
-    const busy = await call("POST", "/api/check", { cookies: [session] });
-    expect(busy.statusCode).toBe(409);
+    expect(statusSchema.parse(JSON.parse(started.body)).run).toMatchObject({
+      state: "running",
+      job: "check",
+    });
+    const again = await call("POST", "/api/check", { cookies: [session] });
+    expect(again.statusCode).toBe(409);
+    expect(JSON.parse(again.body)).toEqual({ error: "busy" });
     expect(lambda.invoked).toHaveLength(1);
+  });
+
+  it("starts an apply only for the plan the person was shown", async () => {
+    const session = await signIn("thomas");
+    const thomas = userIdSchema.parse("thomas");
+    const { store } = ready();
+    const plan = {
+      first: true,
+      save: [],
+      follow: [],
+      create: [],
+      finish: [],
+      review: [],
+      ignored: { albums: 0, playlists: 0 },
+    };
+    await store.putMemberState(thomas, {
+      memory: {
+        reviewed: false,
+        saved: [],
+        playlists: [],
+        ignoredAlbumKeys: [],
+        ignoredPlaylists: [],
+        ignoredPlaylistAlbumKeys: [],
+        unfinished: [],
+      },
+      lastRun: {
+        runId: "shownrun0001",
+        madeAt: new Date().toISOString(),
+        job: "check",
+        plan,
+        applied: null,
+      },
+    });
+
+    const stale = await call("POST", "/api/apply", {
+      cookies: [session],
+      body: { plan: "olderrun0001" },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(JSON.parse(stale.body)).toEqual({ error: "changed" });
+    const missing = await call("POST", "/api/apply", { cookies: [session] });
+    expect(missing.statusCode).toBe(400);
+    expect(lambda.invoked).toEqual([]);
+
+    const started = await call("POST", "/api/apply", {
+      cookies: [session],
+      body: { plan: "shownrun0001" },
+    });
+    expect(started.statusCode).toBe(202);
+    expect(lambda.invoked).toEqual([
+      expect.objectContaining({
+        kind: "apply",
+        requestedBy: "thomas",
+        approved: "shownrun0001",
+      }),
+    ]);
   });
 
   it("signs out by clearing the cookie", async () => {
