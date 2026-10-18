@@ -749,6 +749,77 @@ describe("the day's allowance of Spotify calls", () => {
     ).toEqual([]);
   });
 
+  it("stops partway, and counts as waiting only the playlists it did not get to", async () => {
+    await setUp();
+    // One day with nothing left for looking, to learn what reading costs.
+    await ready().store.addCallsUsed(today(), lookingCalls);
+    await check();
+    const reading = spotify.calls.length;
+
+    // The next day leaves room for reading and a few calls more. Reading
+    // may cost a little more, since a day-old login is renewed.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    vi.setSystemTime(Date.now() + 24 * 3_600_000);
+    await ready().store.addCallsUsed(today(), lookingCalls - reading - 4);
+    await check();
+    const verdicts = await ready().store.getVerdicts();
+    expect(verdicts.size).toBeGreaterThan(0);
+    const waiting = (await lastRun(thomas)).plan.waiting;
+    expect(waiting).toBeGreaterThan(0);
+    expect(waiting).toBe(
+      spotify.library("thomas").playlists.filter((id) => !verdicts.has(id))
+        .length,
+    );
+  });
+
+  it("does not hold back new playlists for playlists Spotify refused", async () => {
+    await setUp();
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/search",
+      403,
+    );
+    await check();
+    const forThomas = (await lastRun(thomas)).plan;
+    expect(forThomas.waiting).toBe(0);
+    expect(forThomas.create.map((entry) => entry.albumId)).toEqual(["Kath"]);
+  });
+
+  it("keeps the count across a run's invocations", async () => {
+    await setUp();
+    await check(() => 1000);
+    const next = lambda.invoked[0];
+    if (next === undefined) throw new Error("The run did not carry on.");
+    await handler(next, context());
+    expect(await ready().store.getCallsUsed(today())).toBe(
+      spotify.calls.length,
+    );
+  });
+
+  it("says an apply is unfinished when it held back playlists the person approved", async () => {
+    await setUp();
+    await check();
+    expect(
+      (await lastRun(thomas)).plan.create.map((entry) => entry.albumId),
+    ).toEqual(["Kath"]);
+    // A playlist turns up after the check, and the day's looking is used.
+    spotify.addPlaylist("thomas", {
+      id: "TNew",
+      name: "Iceage – Seek Shelter",
+      tracks: tracks("Iceage", 12),
+    });
+    await ready().store.addCallsUsed(today(), lookingCalls);
+    await apply(thomas);
+    expect(namesIn("thomas")).not.toContain(
+      "Kathryn Joseph – for you who are the wronged",
+    );
+    const after = await lastRun(thomas);
+    expect(after.plan.waiting).toBe(1);
+    expect(after.applied?.unfinished).toBe(true);
+  });
+
   it("carries on looking the next day", async () => {
     await setUp();
     await ready().store.addCallsUsed(today(), lookingCalls);

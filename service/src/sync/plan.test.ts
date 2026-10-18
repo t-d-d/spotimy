@@ -377,6 +377,17 @@ describe("while some playlists are still to look at", () => {
     expect(made.waiting).toBe(3);
   });
 
+  it("remembers a removed playlist by its name when it had not been looked at, so it is not made again", () => {
+    const kath = saved("K1", "Kathryn Joseph", "Bones", "2026-01-01T00:00:00Z");
+    const first = plan({
+      playlists: [playlist("P9", "Kathryn Joseph – Bones")],
+      saved: [kath],
+      unseen: 1,
+    });
+    const later = plan({ playlists: [], saved: [kath], memory: first.memory });
+    expect(later.plan.create).toEqual([]);
+  });
+
   it("makes and follows them once nothing is left to look at", () => {
     const { plan: made } = plan(library);
     expect(made.create.map((entry) => entry.albumId)).toEqual(["K1"]);

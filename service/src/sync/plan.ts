@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Plan, Settings } from "../../../shared/page-api";
 import type { UserId } from "../ids";
 import type { PlaylistSummary, SavedAlbum } from "../spotify/schemas";
-import { label, nameKeys, norm, playlistName } from "./names";
+import { label, nameKeys, norm, playlistName, splitName } from "./names";
 import { isAlbumish, isWholeAlbum, minCoverage, type Verdict } from "./verdict";
 
 export interface Library {
@@ -97,8 +97,14 @@ function nextMemory(input: PlanInput): Memory {
     id: entry.album.id,
     key: albumKey(label(entry.album)),
   }));
+  // A playlist not looked at yet is known by its name, if it is named like
+  // an album, so removing it is still remembered (sync-safety.md).
   const playlists = library.playlists.map((playlist) => {
     const verdict = verdicts.get(playlist.id);
+    const byName =
+      verdict === undefined && splitName(playlist.name) !== undefined
+        ? albumKey(playlist.name)
+        : null;
     return {
       id: playlist.id,
       albumKey:
@@ -106,7 +112,7 @@ function nextMemory(input: PlanInput): Memory {
         verdict.albumLabel !== null &&
         isAlbumish(verdict)
           ? albumKey(verdict.albumLabel)
-          : null,
+          : byName,
     };
   });
   if (input.memory === undefined) {

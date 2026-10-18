@@ -37,4 +37,4 @@ apart from what the group shares, and every read is along a key.
 - Import the database client outside the store module.
 - Put a Spotify token anywhere but TOKEN.
 
-History: Set when the repo was made, October 2026.
+History: Set when the repo was made, October 2026. ALLOWANCE added in [#8](https://github.com/t-d-d/spotimy/issues/8).

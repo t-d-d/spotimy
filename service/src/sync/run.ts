@@ -164,19 +164,20 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     playlists: new Set(job.skipped?.playlists ?? []),
     searchRefusals: job.skipped?.searchRefusals ?? 0,
   };
-  const day = now().toISOString().slice(0, 10);
-  const calls = new CallCount(
-    store,
-    day,
-    await store.getCallsUsed(day),
-    (error) => {
-      log.warn("calls-unwritten", { ...fields, ...errorFields(error) });
-    },
-  );
   // Kept if this invocation dies without a word, or its next never comes,
   // so the page says the run stopped. Every ending below replaces it.
   await ended("stopped");
+  let calls: CallCount | undefined;
   try {
+    const day = now().toISOString().slice(0, 10);
+    calls = new CallCount(
+      store,
+      day,
+      await store.getCallsUsed(day),
+      (error) => {
+        log.warn("calls-unwritten", { ...fields, ...errorFields(error) });
+      },
+    );
     await work(job, deps, { resumed, skipping, calls });
     await ended("finished");
     await store.endRun(job.runId);
@@ -205,7 +206,7 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     log.error("run-failed", { ...fields, ...errorFields(error) });
     throw error;
   } finally {
-    await calls.save();
+    await calls?.save();
   }
 }
 
@@ -619,7 +620,13 @@ async function planFor(
       applied: {
         at: now().toISOString(),
         ...carried,
-        unfinished: outcome.stopped !== null,
+        // Also when playlists the person approved were held back, as some
+        // of their playlists are still to look at.
+        unfinished:
+          outcome.stopped !== null ||
+          (approved !== undefined &&
+            planned.plan.waiting > 0 &&
+            approved.create.length + approved.follow.length > 0),
       },
     },
   });

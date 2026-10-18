@@ -38,4 +38,5 @@ the owner's apps. The playlist folders people use are not in the API.
 - Retry a 429 sooner than Retry-After says.
 
 History: Set when the repo was made, October 2026. The daily allowance
-added in #8, after a first sweep drew a 21-hour Retry-After.
+added in [#8](https://github.com/t-d-d/spotimy/issues/8), after a first
+sweep drew a 21-hour Retry-After.

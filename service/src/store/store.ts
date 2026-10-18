@@ -401,8 +401,21 @@ export function createStore(config: {
         );
       } catch (error) {
         if (!(error instanceof ConditionalCheckFailedException)) throw error;
-        // The first count of a new day.
-        await put(keys.allowance(), { day, used: count });
+        // The first count of a new day. A count from a day already past is
+        // dropped, never written over a newer one.
+        try {
+          await db.send(
+            new PutCommand({
+              TableName,
+              Item: { ...keys.allowance(), day, used: count },
+              ConditionExpression: "attribute_not_exists(#day) OR #day < :day",
+              ExpressionAttributeNames: { "#day": "day" },
+              ExpressionAttributeValues: { ":day": day },
+            }),
+          );
+        } catch (late) {
+          if (!(late instanceof ConditionalCheckFailedException)) throw late;
+        }
       }
     },
 
