@@ -20,6 +20,11 @@ the owner's apps. The playlist folders people use are not in the API.
 - Every call waits a short gap after the last. A 429 waits for
   Retry-After while the call's waits add up to 45 seconds or less, and
   otherwise stops the run. The next run starts from what it found.
+- spotimy keeps its own allowance of 1,000 calls a UTC day for the
+  whole group, counted in the table, well under Spotify's unpublished
+  limit. A run looks at playlists only while the day's count is under
+  600, and applies only while it is under 1,000. What is left waits for
+  the next day's run.
 - 401 refreshes the person's token once.
 - Every answer is parsed by a schema in service/src/spotify/schemas.ts.
 - What a playlist was found to be is cached by its snapshot_id, so an
@@ -32,4 +37,6 @@ the owner's apps. The playlist folders people use are not in the API.
 - Scrape or call open.spotify.com.
 - Retry a 429 sooner than Retry-After says.
 
-History: Set when the repo was made, October 2026.
+History: Set when the repo was made, October 2026. The daily allowance
+added in [#8](https://github.com/t-d-d/spotimy/issues/8), after a first
+sweep drew a 21-hour Retry-After.

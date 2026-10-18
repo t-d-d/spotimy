@@ -32,6 +32,9 @@ took away teaches them not to trust it.
   missing.
 - Follow the group's playlists only for album playlists a member owns,
   and only when the person has no playlist for that album yet.
+- While some of a person's playlists are still to be looked at, their
+  plan makes and follows no playlists: an unseen one may already be the
+  album's.
 - One run at a time, for the whole group. The API takes the lock before
   it starts the worker.
 - A run that stops early says so, and its plan lists what is left.
@@ -47,4 +50,4 @@ took away teaches them not to trust it.
 Judgment: If Spotify accepts a save but does not add the album, for
 example because it is not sold in the person's country, the next run
 counts it as removed. That errs the safe way.
-History: Set when the repo was made, October 2026. Tightened the same day after a review found applies that went beyond the plan shown.
+History: Set when the repo was made, October 2026. Tightened the same day after a review found applies that went beyond the plan shown. Holding back playlists until all are seen added in [#8](https://github.com/t-d-d/spotimy/issues/8).

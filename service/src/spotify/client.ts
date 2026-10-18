@@ -62,6 +62,8 @@ export interface ClientOptions {
   sleep?: (ms: number) => Promise<void>;
   // The gap kept between two calls.
   gapMs?: number;
+  // Told of every call sent, retries included, for the day's allowance.
+  onCall?: () => void;
   // The most one call waits through, over all its tries, before giving up,
   // so a run always has time left to save what it did.
   maxWaitSeconds?: number;
@@ -81,6 +83,7 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
     fetch: send = fetch,
     sleep = realSleep,
     gapMs = defaultGapMs,
+    onCall = () => undefined,
     maxWaitSeconds = defaultMaxWaitSeconds,
   } = options;
   let lastCall = 0;
@@ -107,6 +110,7 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
       if (wait > 0) await sleep(wait);
       lastCall = Date.now();
       const token = await tokens.current();
+      onCall();
       let response: Response;
       try {
         response = await send(url, {

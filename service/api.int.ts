@@ -252,6 +252,7 @@ describe("the page's API", () => {
       finish: [],
       review: [],
       ignored: { albums: 0, playlists: 0 },
+      waiting: 0,
     };
     await store.putMemberState(thomas, {
       memory: {

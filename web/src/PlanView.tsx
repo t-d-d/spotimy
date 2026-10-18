@@ -1,6 +1,6 @@
 import type { Plan } from "../../shared/page-api";
 import styles from "./Page.module.css";
-import { byYear, hasWork, ignoredLine } from "./view";
+import { byYear, hasWork, ignoredLine, waitingLine } from "./view";
 
 const matchNote = {
   tracks: undefined,
@@ -10,11 +10,13 @@ const matchNote = {
 
 export function PlanView({ plan }: { plan: Plan }) {
   const ignored = ignoredLine(plan.ignored);
+  const waiting = waitingLine(plan);
   return (
     <section className={styles.card} aria-labelledby="plan">
       <h2 id="plan" className={styles.section}>
         {hasWork(plan) ? "What applying would change" : "Nothing to change"}
       </h2>
+      {waiting === undefined ? null : <p className={styles.note}>{waiting}</p>}
       {plan.first && hasWork(plan) ? (
         <p className={styles.note}>
           Nothing changes in your library until you press Apply.

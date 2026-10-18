@@ -45,6 +45,12 @@ export type Profile = z.infer<typeof profileSchema>;
 
 const memberSchema = z.object({ id: userIdSchema, name: z.string() });
 
+// One item, for today only: a new day starts the count again.
+const allowanceSchema = z.object({
+  day: z.string(),
+  used: z.number().int().nonnegative(),
+});
+
 export type Member = z.infer<typeof memberSchema>;
 
 const tokensSchema = z.object({
@@ -98,6 +104,9 @@ export interface Store {
   // Only while the run holds the lock, so one that lapsed cannot overwrite
   // a newer run's ending.
   putOutcome: (outcome: Outcome) => Promise<void>;
+  // The group's Spotify calls on a UTC day, for spotimy's own allowance.
+  getCallsUsed: (day: string) => Promise<number>;
+  addCallsUsed: (day: string, count: number) => Promise<void>;
   // Deletes everything the person's key holds, their membership, and what
   // was found about the playlists they own.
   leave: (id: UserId) => Promise<void>;
@@ -372,6 +381,43 @@ export function createStore(config: {
     },
 
     getOutcome: () => get(keys.outcome(), outcomeSchema),
+
+    getCallsUsed: async (day) => {
+      const allowance = await get(keys.allowance(), allowanceSchema);
+      return allowance?.day === day ? allowance.used : 0;
+    },
+
+    addCallsUsed: async (day, count) => {
+      try {
+        await db.send(
+          new UpdateCommand({
+            TableName,
+            Key: keys.allowance(),
+            UpdateExpression: "ADD used :count",
+            ConditionExpression: "#day = :day",
+            ExpressionAttributeNames: { "#day": "day" },
+            ExpressionAttributeValues: { ":count": count, ":day": day },
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof ConditionalCheckFailedException)) throw error;
+        // The first count of a new day. A count from a day already past is
+        // dropped, never written over a newer one.
+        try {
+          await db.send(
+            new PutCommand({
+              TableName,
+              Item: { ...keys.allowance(), day, used: count },
+              ConditionExpression: "attribute_not_exists(#day) OR #day < :day",
+              ExpressionAttributeNames: { "#day": "day" },
+              ExpressionAttributeValues: { ":day": day },
+            }),
+          );
+        } catch (late) {
+          if (!(late instanceof ConditionalCheckFailedException)) throw late;
+        }
+      }
+    },
 
     putOutcome: async (outcome) => {
       try {

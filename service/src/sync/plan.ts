@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Plan, Settings } from "../../../shared/page-api";
 import type { UserId } from "../ids";
 import type { PlaylistSummary, SavedAlbum } from "../spotify/schemas";
-import { label, nameKeys, norm, playlistName } from "./names";
+import { label, nameKeys, norm, playlistName, splitName } from "./names";
 import { isAlbumish, isWholeAlbum, minCoverage, type Verdict } from "./verdict";
 
 export interface Library {
@@ -70,6 +70,8 @@ export interface PlanInput {
   verdicts: ReadonlyMap<string, Verdict>;
   group: GroupPlaylist[];
   memory: Memory | undefined;
+  // How many of the person's playlists spotimy has not looked at yet.
+  unseen: number;
 }
 
 export interface Actions {
@@ -95,8 +97,14 @@ function nextMemory(input: PlanInput): Memory {
     id: entry.album.id,
     key: albumKey(label(entry.album)),
   }));
+  // A playlist not looked at yet is known by its name, if it is named like
+  // an album, so removing it is still remembered (sync-safety.md).
   const playlists = library.playlists.map((playlist) => {
     const verdict = verdicts.get(playlist.id);
+    const byName =
+      verdict === undefined && splitName(playlist.name) !== undefined
+        ? albumKey(playlist.name)
+        : null;
     return {
       id: playlist.id,
       albumKey:
@@ -104,7 +112,7 @@ function nextMemory(input: PlanInput): Memory {
         verdict.albumLabel !== null &&
         isAlbumish(verdict)
           ? albumKey(verdict.albumLabel)
-          : null,
+          : byName,
     };
   });
   if (input.memory === undefined) {
@@ -206,8 +214,12 @@ export function makePlan(input: PlanInput): Planned {
       albums: memory.ignoredAlbumKeys.length,
       playlists: memory.ignoredPlaylists.length,
     },
+    waiting: input.unseen,
   };
   const actions: Actions = { save: [], follow: [], create: [], finish: [] };
+  // A playlist not looked at yet may already be this album's, so nothing is
+  // made or followed until every one has been seen (sync-safety.md).
+  const seenAll = input.unseen === 0;
   const queued = new Set<string>();
 
   const save = (
@@ -243,7 +255,7 @@ export function makePlan(input: PlanInput): Planned {
 
   // 2. The group's album playlists this library has none of, unless the
   //    person removed the album or a playlist of it.
-  if (settings.followGroup) {
+  if (settings.followGroup && seenAll) {
     for (const shared of group) {
       const key = albumKey(shared.albumLabel);
       if (shared.ownerId === library.userId) continue;
@@ -273,7 +285,7 @@ export function makePlan(input: PlanInput): Planned {
   const byAge = [...library.saved].sort((a, b) =>
     a.added_at.localeCompare(b.added_at),
   );
-  for (const saved of byAge) {
+  for (const saved of seenAll ? byAge : []) {
     const { album } = saved;
     const key = albumKey(label(album));
     if (isCovered(album.id, key)) continue;

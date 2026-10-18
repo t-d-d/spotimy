@@ -6,6 +6,7 @@ import {
   ignoredLine,
   outcomeLine,
   progressLine,
+  waitingLine,
   runLine,
   signInMessage,
 } from "./view";
@@ -57,6 +58,7 @@ const last = (applied: LastRun["applied"]): LastRun => ({
     finish: [],
     review: [],
     ignored: { albums: 0, playlists: 0 },
+    waiting: 0,
   },
   applied,
 });
@@ -131,7 +133,7 @@ describe("what the page says", () => {
     expect(
       appliedLine(last(applied({ saved: 1, unfinished: true })), now),
     ).toMatch(
-      /saved 1 album\. Spotify asked spotimy to stop before it was done\. Press Apply again later for the rest\.$/u,
+      /saved 1 album\. It stopped before it was done, to stay within Spotify's limits\. Press Apply again later for the rest\.$/u,
     );
   });
 
@@ -254,5 +256,16 @@ describe("what the page says", () => {
         now,
       ),
     ).toBeUndefined();
+  });
+
+  it("says how many of the person's playlists are still to look at", () => {
+    const { plan } = last(null);
+    expect(waitingLine(plan)).toBeUndefined();
+    expect(waitingLine({ ...plan, waiting: 1530 })).toBe(
+      "spotimy has still to look at 1,530 of your playlists. It looks at more each morning, and holds back new and followed playlists until it has seen them all.",
+    );
+    expect(waitingLine({ ...plan, waiting: 1 })).toBe(
+      "spotimy has still to look at 1 of your playlists. It looks at more each morning, and holds back new and followed playlists until it has seen them all.",
+    );
   });
 });

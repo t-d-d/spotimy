@@ -107,9 +107,15 @@ export function appliedLine(last: LastRun, now: Date): string | undefined {
       ? ` ${plural(applied.failed, "change", "changes")} failed. They are in the plan again.`
       : "";
   const unfinished = applied.unfinished
-    ? " Spotify asked spotimy to stop before it was done. Press Apply again later for the rest."
+    ? " It stopped before it was done, to stay within Spotify's limits. Press Apply again later for the rest."
     : "";
   return `Applied ${time(applied.at, now)}: ${done}.${failed}${unfinished}`;
+}
+
+// The person's playlists still to look at, within the day's allowance.
+export function waitingLine(plan: Plan): string | undefined {
+  if (plan.waiting === 0) return undefined;
+  return `spotimy has still to look at ${counted(plan.waiting)} of your playlists. It looks at more each morning, and holds back new and followed playlists until it has seen them all.`;
 }
 
 // New playlists by the year folder each belongs in, newest year first.

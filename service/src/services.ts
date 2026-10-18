@@ -18,6 +18,8 @@ export interface Services {
   clientFor: (
     member: Member,
     log: Logger,
+    // Told of every call the client sends.
+    onCall?: () => void,
   ) => Promise<SpotifyClient | undefined>;
 }
 
@@ -46,7 +48,7 @@ export function ready(): Services {
       functionName: env.workerFunction,
       endpoint: env.lambdaEndpoint,
     }),
-    clientFor: async (member, log) => {
+    clientFor: async (member, log, onCall) => {
       const initial = await store.getTokens(member.id);
       if (initial === undefined) return undefined;
       const tokens = tokenSource({
@@ -71,7 +73,12 @@ export function ready(): Services {
         });
         return undefined;
       }
-      return createSpotifyClient({ apiBase: env.spotifyApiBase, tokens, log });
+      return createSpotifyClient({
+        apiBase: env.spotifyApiBase,
+        tokens,
+        log,
+        ...(onCall === undefined ? {} : { onCall }),
+      });
     },
   };
   services = made;

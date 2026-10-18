@@ -34,10 +34,15 @@ function scripted(answers: (() => Response)[]) {
 
 function client(send: typeof fetch, renewed: string[] = []) {
   const waits: number[] = [];
+  const counted = { calls: 0 };
   let token = "first";
   return {
     waits,
+    counted,
     spotify: createSpotifyClient({
+      onCall: () => {
+        counted.calls += 1;
+      },
       apiBase,
       log: silentLogger,
       fetch: send,
@@ -107,6 +112,19 @@ describe("the Spotify client", () => {
     await expect(
       client(refused.send).spotify.get("/me", meSchema),
     ).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("counts every call it sends, retries and pages included, for the day's allowance", async () => {
+    const { send } = scripted([
+      status(503),
+      ok({ items: [{ id: "a" }], next: `${apiBase}/me/playlists?offset=1` }),
+      ok({ items: [{ id: "b" }], next: null }),
+    ]);
+    const { spotify, counted } = client(send);
+    for await (const item of spotify.pages("/me/playlists", meSchema)) {
+      expect(item.id).toMatch(/^[ab]$/u);
+    }
+    expect(counted.calls).toBe(3);
   });
 
   it("follows next links through every page", async () => {

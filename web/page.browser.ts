@@ -60,6 +60,7 @@ const status = (overrides: Partial<Status> = {}): Status => ({
         { playlist: "Road trip", kind: "mixed", detail: "No one album." },
       ],
       ignored: { albums: 0, playlists: 0 },
+      waiting: 0,
     },
     applied: null,
   },
@@ -307,5 +308,29 @@ describe("signed in", () => {
       .getByRole("status")
       .getByText(/stopped with an error/u)
       .waitFor({ timeout: 10_000 });
+  });
+
+  it("says how many playlists are still to look at", async () => {
+    const shown = status();
+    const { page } = await openPage(
+      "/",
+      answering({
+        "GET /api/status": () => ({
+          status: 200,
+          body:
+            shown.last === null
+              ? shown
+              : {
+                  ...shown,
+                  last: {
+                    ...shown.last,
+                    plan: { ...shown.last.plan, waiting: 1530 },
+                  },
+                },
+        }),
+      }),
+    );
+    // The wording is the unit tier's. This checks the line reaches the page.
+    await page.getByText(/still to look at 1,530 of your playlists/u).waitFor();
   });
 });

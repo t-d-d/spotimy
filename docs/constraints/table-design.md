@@ -11,7 +11,8 @@ apart from what the group shares, and every read is along a key.
 - Partition keys: GROUP, and USER#<id> for each person.
 - Under GROUP: MEMBER#<id> for each member, PLAYLIST#<id> for what a
   playlist was found to be, RUN for the one run in progress and how far
-  it has got, and OUTCOME for how the last run ended.
+  it has got, OUTCOME for how the last run ended, and ALLOWANCE for the
+  group's Spotify calls today.
 - Under USER#<id>: PROFILE (name and settings), TOKEN (Spotify tokens),
   PLAN (the last run's plan and the person's last apply) and MEMORY
   (what the library held after the last run, what the person removed,
@@ -36,4 +37,4 @@ apart from what the group shares, and every read is along a key.
 - Import the database client outside the store module.
 - Put a Spotify token anywhere but TOKEN.
 
-History: Set when the repo was made, October 2026.
+History: Set when the repo was made, October 2026. ALLOWANCE added in [#8](https://github.com/t-d-d/spotimy/issues/8).

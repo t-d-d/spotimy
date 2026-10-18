@@ -48,6 +48,8 @@ export interface Outcome {
   stopped:
     | { reason: "rate-limited"; retryAfter: number }
     | { reason: "out-of-time" }
+    // The day's allowance of Spotify calls ran out. The rest waits.
+    | { reason: "allowance" }
     | null;
 }
 
@@ -126,10 +128,12 @@ export async function applyActions(config: {
   privatePlaylists: boolean;
   // Whether there is time for one more change before the function's limit.
   hasTime: () => boolean;
+  // Whether the day's allowance of Spotify calls has room for one more.
+  hasCalls: () => boolean;
   record: (change: Change) => Promise<void>;
   log: Logger;
 }): Promise<Outcome> {
-  const { client, actions, log, userId, record, hasTime } = config;
+  const { client, actions, log, userId, record, hasTime, hasCalls } = config;
   const outcome: Outcome = {
     saved: 0,
     followed: 0,
@@ -147,6 +151,10 @@ export async function applyActions(config: {
   ): Promise<boolean> => {
     if (!hasTime()) {
       outcome.stopped = { reason: "out-of-time" };
+      return false;
+    }
+    if (!hasCalls()) {
+      outcome.stopped = { reason: "allowance" };
       return false;
     }
     try {
