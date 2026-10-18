@@ -116,6 +116,8 @@ export const errorAnswerSchema = z.object({
   error: z.object({ message: z.string() }),
 });
 
+export type ErrorAnswer = z.infer<typeof errorAnswerSchema>;
+
 export const tokenSchema = z.object({
   access_token: z.string().min(1),
   refresh_token: z.string().min(1).optional(),

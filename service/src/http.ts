@@ -108,21 +108,6 @@ export class UnreadableAnswer extends Error {
 }
 
 // Drains a body nobody needs, so the connection can be reused.
-// A body that may be missing or not fit, as in an error answer.
-export async function optionalBody<T>(
-  response: Response,
-  schema: z.ZodType<T>,
-): Promise<T | undefined> {
-  let data: unknown;
-  try {
-    data = await response.json(); // eslint-disable-line no-restricted-syntax -- this module is where a body is read
-  } catch {
-    return undefined;
-  }
-  const parsed = schema.safeParse(data);
-  return parsed.success ? parsed.data : undefined;
-}
-
 export async function discardBody(response: Response): Promise<void> {
   await response.arrayBuffer().catch(() => undefined); // eslint-disable-line no-restricted-syntax -- this module is where a body is read
 }

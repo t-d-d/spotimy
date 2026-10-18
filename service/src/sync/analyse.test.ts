@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
+import { errorFields } from "../log";
 import { SpotifyError, type SpotifyClient } from "../spotify/client";
 import type { PlaylistSummary } from "../spotify/schemas";
 import { createNameReader } from "./analyse";
@@ -48,8 +49,8 @@ describe("finding playlists by name", () => {
   it("stops after three refused searches in a row, counting searches rather than playlists", async () => {
     const { client, searched } = searching([400, 400, 400]);
     const refused: number[] = [];
-    const read = createNameReader({ searchRefusals: 0 }, (status) => {
-      refused.push(status);
+    const read = createNameReader({ searchRefusals: 0 }, (error) => {
+      refused.push(error.status);
     });
     expect(await read(client, album)).toBeUndefined();
     // A mosaic is never searched for, so it does not reset the count.
@@ -94,5 +95,29 @@ describe("finding playlists by name", () => {
     await read(client, album);
     await read(client, album);
     expect(searched).toHaveLength(1);
+  });
+
+  it("hands on Spotify's refusal itself, so its reason reaches the log", async () => {
+    const refusal = new SpotifyError(
+      403,
+      "GET /search",
+      "Active premium subscription required for the owner of the app.",
+    );
+    const client: SpotifyClient = {
+      get: () => Promise.reject(refusal),
+      pages: () => {
+        throw new Error("Not used.");
+      },
+      put: () => Promise.reject(new Error("Not used.")),
+      post: () => Promise.reject(new Error("Not used.")),
+    };
+    const refused: unknown[] = [];
+    const read = createNameReader({ searchRefusals: 0 }, (error) => {
+      refused.push(error);
+    });
+    await read(client, album);
+    expect(refused.map(errorFields)).toEqual([
+      { errorClass: "SpotifyError:PremiumRequired", status: 403 },
+    ]);
   });
 });

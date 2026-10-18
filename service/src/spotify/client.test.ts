@@ -154,9 +154,24 @@ describe("the Spotify client", () => {
       errorClass: "SpotifyError:Forbidden",
       status: 403,
     });
-    const other = errorFields(await caught(refusal("Bully Lucky For You")));
-    expect(other).toEqual({ errorClass: "SpotifyError:Other", status: 403 });
-    expect(JSON.stringify(other)).not.toMatch(/Bully/u);
+    expect(
+      errorFields(
+        await caught(
+          refusal(
+            "Check settings on developer.spotify.com/dashboard, the user may not be registered.",
+          ),
+        ),
+      ),
+    ).toEqual({ errorClass: "SpotifyError:UserNotRegistered", status: 403 });
+    const unknown = await caught(refusal("Bully Lucky For You"));
+    expect(errorFields(unknown)).toEqual({
+      errorClass: "SpotifyError:Other",
+      status: 403,
+    });
+    expect(unknown instanceof Error ? unknown.message : "").not.toMatch(
+      /Bully/u,
+    );
+    expect(JSON.stringify(errorFields(unknown))).not.toMatch(/Bully/u);
     expect(errorFields(await caught(status(403)))).toEqual({
       errorClass: "SpotifyError",
       status: 403,

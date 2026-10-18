@@ -1,6 +1,6 @@
 // A whole run, end to end: the worker, the real store on a local DynamoDB,
 // and the real Spotify client talking to the fake Spotify.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { userIdSchema, type UserId } from "./src/ids";
 import type { Outcome } from "../shared/page-api";
 import type { RunState } from "./src/store/store";
@@ -634,6 +634,28 @@ describe("refusals about one playlist", () => {
     expect(
       (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
     ).toContain("Caro");
+  });
+
+  it("logs why Spotify refused a search", async () => {
+    await setUp();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      warn.mockRestore();
+    });
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/search",
+      403,
+      "Active premium subscription required for the owner of the app.",
+    );
+    await check();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "name-search-refused",
+        errorClass: "SpotifyError:PremiumRequired",
+        status: 403,
+      }),
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/premium/u);
   });
 
   it("stops searching by name for the rest of the run once Spotify refuses search", async () => {

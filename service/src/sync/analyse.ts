@@ -158,7 +158,7 @@ const searchRefusalLimit = 3;
 // it stops searching. The count is the run's, carried across invocations.
 export function createNameReader(
   state: { searchRefusals: number },
-  onRefused: (status: number) => void,
+  onRefused: (error: SpotifyError) => void,
 ) {
   const search: Search = async (client, query) => {
     try {
@@ -182,7 +182,7 @@ export function createNameReader(
       return await identifyByName(client, playlist, search);
     } catch (error) {
       if (!(error instanceof SpotifyError) || error.status >= 500) throw error;
-      onRefused(error.status);
+      onRefused(error);
       return undefined;
     }
   };
@@ -193,13 +193,13 @@ export function createNameReader(
 // and after a refusal, or three empty answers in a row, stops trying for the
 // rest of the run. Only the documented /items endpoint is used.
 export function createFollowedReader(
-  onUnreadable: (status: number | undefined) => void,
+  onUnreadable: (refusal: SpotifyError | undefined) => void,
 ) {
   let readable = true;
   let emptyInARow = 0;
-  const stop = (status?: number) => {
+  const stop = (refusal?: SpotifyError) => {
     readable = false;
-    onUnreadable(status);
+    onUnreadable(refusal);
   };
   return async (
     client: SpotifyClient,
@@ -211,7 +211,7 @@ export function createFollowedReader(
       verdict = await analyseTracks(client, playlist);
     } catch (error) {
       if (error instanceof SpotifyError && error.status === 403) {
-        stop(error.status);
+        stop(error);
         return undefined;
       }
       // Any other refusal is about this playlist alone.
