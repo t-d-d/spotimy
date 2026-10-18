@@ -89,6 +89,7 @@ export interface FakeSpotify {
   failMatching: (
     match: (method: string, path: string, query: URLSearchParams) => boolean,
     status: number,
+    message?: string,
   ) => void;
   // As limitNext, but only for calls that match, such as "POST /me/playlists".
   limitMatching: (
@@ -126,7 +127,8 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
   ) => boolean;
   const always: Matcher = () => true;
   let limited = { times: 0, retryAfter: 0, match: always };
-  let failing: { match: Matcher; status: number } | undefined;
+  let failing:
+    { match: Matcher; status: number; message: string | undefined } | undefined;
   const calls: Call[] = [];
   let base = "";
 
@@ -285,7 +287,14 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       userId,
     });
     if (failing?.match(request.method ?? "", path, url.searchParams) === true) {
-      reply(response, failing.status, { error: { status: failing.status } });
+      reply(response, failing.status, {
+        error: {
+          status: failing.status,
+          ...(failing.message === undefined
+            ? {}
+            : { message: failing.message }),
+        },
+      });
       return;
     }
     if (
@@ -623,8 +632,8 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
     limitNext: (times, retryAfter) => {
       limited = { times, retryAfter, match: always };
     },
-    failMatching: (match, status) => {
-      failing = { match, status };
+    failMatching: (match, status, message) => {
+      failing = { match, status, message };
     },
     limitMatching: (match, times, retryAfter) => {
       limited = { times, retryAfter, match };

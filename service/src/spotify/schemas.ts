@@ -110,6 +110,14 @@ export const createdPlaylistSchema = z.object({
 
 export const snapshotSchema = z.object({ snapshot_id: z.string() });
 
+// What Spotify says when it refuses a call. Its words are matched to a fixed
+// reason and never kept (logging.md).
+export const errorAnswerSchema = z.object({
+  error: z.object({ message: z.string() }),
+});
+
+export type ErrorAnswer = z.infer<typeof errorAnswerSchema>;
+
 export const tokenSchema = z.object({
   access_token: z.string().min(1),
   refresh_token: z.string().min(1).optional(),

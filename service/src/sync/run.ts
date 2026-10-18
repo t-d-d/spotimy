@@ -251,14 +251,14 @@ async function work(
   const owners = new Map<string, Reader>(
     readers.map((reader) => [reader.member.id, reader]),
   );
-  const followedReader = createFollowedReader((status) => {
+  const followedReader = createFollowedReader((refusal) => {
     log.info("followed-tracks-unreadable", {
       ...fields,
-      ...(status === undefined ? {} : { status }),
+      ...(refusal === undefined ? {} : errorFields(refusal)),
     });
   });
-  const nameReader = createNameReader(skipping, (status) => {
-    log.warn("name-search-refused", { ...fields, status });
+  const nameReader = createNameReader(skipping, (refusal) => {
+    log.warn("name-search-refused", { ...fields, ...errorFields(refusal) });
   });
   const seen = new Set<string>();
   const toRead: { reader: Reader; playlist: PlaylistSummary }[] = [];
