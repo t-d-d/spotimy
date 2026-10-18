@@ -31,16 +31,29 @@ export const albumSchema = z.object({
 
 export type Album = z.infer<typeof albumSchema>;
 
+// A local file's track has an album with no id. It is dropped, not refused,
+// so one odd track does not stop a playlist being read.
 export const trackSchema = simpleTrackSchema.extend({
-  album: albumSchema.optional(),
+  album: albumSchema.optional().catch(undefined),
 });
 
 export type Track = z.infer<typeof trackSchema>;
 
-// A page's items may hold nulls, for content since removed.
-export function pageSchema<T extends z.ZodType>(item: T) {
+// A page's items may hold nulls, for content since removed. An item that
+// does not fit is dropped and counted, so one odd item does not stop a run.
+export function pageSchema<T>(item: z.ZodType<T>) {
   return z.object({
-    items: z.array(item.nullable()),
+    items: z.array(z.unknown()).transform((items) => {
+      const kept: T[] = [];
+      let skipped = 0;
+      for (const entry of items) {
+        if (entry === null) continue;
+        const parsed = item.safeParse(entry);
+        if (parsed.success) kept.push(parsed.data);
+        else skipped += 1;
+      }
+      return { kept, skipped };
+    }),
     next: z.string().nullable(),
   });
 }

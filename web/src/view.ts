@@ -24,8 +24,42 @@ export function runLine(status: Status, now: Date): string {
   if (run.state === "paused" && run.retryAt !== null) {
     return `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept.`;
   }
-  if (last === null) return "Not checked yet.";
+  if (last === null) {
+    return "Not checked yet. Press Check now to see what spotimy would change.";
+  }
   return `Last checked ${time(last.madeAt, now)}.`;
+}
+
+const counted = (count: number) => count.toLocaleString("en-GB");
+
+// How far the run in progress has got.
+export function progressLine(status: Status): string | undefined {
+  const { run } = status;
+  if (run.state !== "running" || run.progress === null) return undefined;
+  const { stage, done, total } = run.progress;
+  const what = {
+    reading: "Reading libraries",
+    identifying: "Looking at playlists",
+    applying: "Making changes",
+  }[stage];
+  return `${what}: ${counted(done)} of ${counted(total)}.`;
+}
+
+// Why the last run ended early, until a newer plan shows a later run worked.
+export function outcomeLine(status: Status, now: Date): string | undefined {
+  const { outcome, last, run } = status;
+  if (outcome === null || run.state !== "idle") return undefined;
+  if (outcome.result === "finished") return undefined;
+  if (last !== null && last.madeAt > outcome.finishedAt) return undefined;
+  const what = outcome.job === "apply" ? "apply" : "check";
+  switch (outcome.result) {
+    case "failed":
+      return `The last ${what} stopped with an error ${time(outcome.finishedAt, now)}. Press Check now to try again.`;
+    case "stopped":
+      return `The last ${what} ran too long and stopped. What it found is kept, so press Check now to carry on.`;
+    case "paused":
+      return `Spotify asked spotimy to wait, so the last ${what} stopped early. What it found is kept, so press Check now to carry on.`;
+  }
 }
 
 export const hasWork = (plan: Plan): boolean =>

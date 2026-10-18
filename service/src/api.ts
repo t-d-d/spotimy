@@ -243,6 +243,7 @@ async function startRun(
       startedAt: now().toISOString(),
       retryAt: null,
       expiresAt: Math.floor(now().getTime() / 1000) + lockSeconds,
+      progress: null,
     },
     now(),
   );
@@ -269,11 +270,12 @@ async function startRun(
 
 async function status(userId: UserId, services: Services): Promise<Status> {
   const { store, now } = services;
-  const [profile, members, run, last] = await Promise.all([
+  const [profile, members, run, last, outcome] = await Promise.all([
     store.getProfile(userId),
     store.listMembers(),
     store.getRun(),
     store.getLastRun(userId),
+    store.getOutcome(),
   ]);
   const nowSeconds = Math.floor(now().getTime() / 1000);
   const active =
@@ -287,7 +289,9 @@ async function status(userId: UserId, services: Services): Promise<Status> {
       job: active?.job ?? null,
       startedAt: active?.startedAt ?? null,
       retryAt: active?.retryAt ?? null,
+      progress: active?.progress ?? null,
     },
     last: last ?? null,
+    outcome: outcome ?? null,
   };
 }

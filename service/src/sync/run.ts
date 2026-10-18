@@ -67,6 +67,13 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
   const fields = { runId: job.runId, job: job.kind };
   if (job.hop > maxHops) {
     log.warn("run-failed", { ...fields, errorClass: "TooManyHops" });
+    await store.putOutcome({
+      runId: job.runId,
+      job: job.kind,
+      finishedAt: now().toISOString(),
+      result: "stopped",
+      retryAt: null,
+    });
     await store.endRun(job.runId);
     return { state: "stopped" };
   }
@@ -80,20 +87,35 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
       existing?.runId === job.runId ? existing.startedAt : now().toISOString(),
     retryAt: null,
     expiresAt: Math.floor(now().getTime() / 1000) + lockSeconds,
+    progress: existing?.runId === job.runId ? existing.progress : null,
   };
   if (!(await store.takeRun(lock, now()))) {
     log.info("run-busy", fields);
     return { state: "busy" };
   }
   log.info(job.hop === 0 ? "run-started" : "run-continued", fields);
+  // How the run ended, for the page, so no ending is silent.
+  const ended = (
+    result: "finished" | "failed" | "paused" | "stopped",
+    retryAt: Date | null = null,
+  ) =>
+    store.putOutcome({
+      runId: job.runId,
+      job: job.kind,
+      finishedAt: now().toISOString(),
+      result,
+      retryAt: retryAt?.toISOString() ?? null,
+    });
   try {
     await work(job, deps);
+    await ended("finished");
     await store.endRun(job.runId);
     log.info("run-finished", fields);
     return { state: "finished" };
   } catch (error) {
     if (error instanceof RateLimited) {
       const retryAt = new Date(now().getTime() + error.retryAfter * 1000);
+      await ended("paused", retryAt);
       await store.pauseRun(job.runId, retryAt);
       log.warn("run-paused", { ...fields, retryAfter: error.retryAfter });
       return { state: "paused", retryAt };
@@ -101,6 +123,7 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     if (error instanceof OutOfTime) {
       return { state: "continue", carried: error.carried };
     }
+    await ended("failed").catch(() => undefined);
     await store.endRun(job.runId);
     log.error("run-failed", { ...fields, errorClass: errorClass(error) });
     throw error;
@@ -142,7 +165,13 @@ async function work(job: Job, deps: RunDeps): Promise<void> {
   const members = await store.listMembers();
   const memberIds = new Set<string>(members.map((member) => member.id));
   const readers: Reader[] = [];
-  for (const member of members) {
+  const progress = (
+    stage: "reading" | "identifying" | "applying",
+    done: number,
+    total: number,
+  ) => store.setProgress(job.runId, { stage, done, total });
+  for (const [index, member] of members.entries()) {
+    await progress("reading", index, members.length);
     const client = await deps.clientFor(member);
     if (client === undefined) continue;
     const library = await readLibrary(member, client);
@@ -170,28 +199,41 @@ async function work(job: Job, deps: RunDeps): Promise<void> {
   const followedReader = createFollowedReader(() => {
     log.info("followed-tracks-unreadable", fields);
   });
+  // A playlist is read again when it changed, or when its owner has joined
+  // since it was matched by name, so its tracks can now be read.
   const seen = new Set<string>();
+  const toRead: { reader: Reader; playlist: PlaylistSummary }[] = [];
+  for (const reader of readers) {
+    for (const playlist of reader.library.playlists) {
+      if (seen.has(playlist.id)) continue;
+      seen.add(playlist.id);
+      const owner = owners.get(playlist.owner.id);
+      if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
+      const cached = verdicts.get(playlist.id);
+      if (
+        cached?.snapshot === playlist.snapshot_id &&
+        (owner === undefined || cached.method === "tracks")
+      ) {
+        continue;
+      }
+      toRead.push({ reader, playlist });
+    }
+  }
   let read = 0;
   try {
-    for (const reader of readers) {
-      for (const playlist of reader.library.playlists) {
-        if (seen.has(playlist.id)) continue;
-        seen.add(playlist.id);
-        if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
-          continue;
-        const owner = owners.get(playlist.owner.id);
-        if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
-        if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
-        const verdict =
-          owner === undefined
-            ? ((await followedReader(reader.client, playlist)) ??
-              (await identifyByName(reader.client, playlist)))
-            : await analyseTracks(owner.client, playlist);
-        verdicts.set(playlist.id, verdict);
-        pending.push(verdict);
-        read += 1;
-        if (pending.length >= 10) await flush();
-      }
+    for (const { reader, playlist } of toRead) {
+      if (read % 10 === 0) await progress("identifying", read, toRead.length);
+      if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
+      const owner = owners.get(playlist.owner.id);
+      const verdict =
+        owner === undefined
+          ? ((await followedReader(reader.client, playlist)) ??
+            (await identifyByName(reader.client, playlist)))
+          : await analyseTracks(owner.client, playlist);
+      verdicts.set(playlist.id, verdict);
+      pending.push(verdict);
+      read += 1;
+      if (pending.length >= 10) await flush();
     }
   } finally {
     await flush();
@@ -294,7 +336,23 @@ async function planFor(
     made: new Map<string, { playlistId: string; name: string }>(),
     filled: new Set<string>(),
   };
+  const total =
+    actions.save.length +
+    actions.follow.length +
+    actions.create.length +
+    actions.finish.length;
+  let changes = 0;
   const record = async (change: Change) => {
+    if (change.kind !== "made") {
+      changes += 1;
+      if (changes % 5 === 0 || changes === total) {
+        await store.setProgress(job.runId, {
+          stage: "applying",
+          done: changes,
+          total,
+        });
+      }
+    }
     switch (change.kind) {
       case "saved":
         done.saved.add(change.albumId);

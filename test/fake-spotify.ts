@@ -32,6 +32,7 @@ interface FakePlaylist {
   public: boolean;
   snapshot: number;
   entries: { albumId: string; index: number; addedAt: string }[];
+  localFiles: number;
   images?: { url: string }[];
 }
 
@@ -65,6 +66,7 @@ export interface FakeSpotify {
       tracks: { albumId: string; index: number }[];
       public?: boolean;
       images?: { url: string }[];
+      localFiles?: number;
     },
   ) => void;
   follow: (userId: string, playlistId: string) => void;
@@ -83,6 +85,11 @@ export interface FakeSpotify {
   authorize: (userId: string, challenge: string, redirectUri: string) => string;
   // The next `times` API calls get a 429 with this Retry-After.
   limitNext: (times: number, retryAfter: number) => void;
+  // Answers calls that match with this status, as Spotify might in a bad hour.
+  failMatching: (
+    match: (method: string, path: string) => boolean,
+    status: number,
+  ) => void;
   // As limitNext, but only for calls that match, such as "POST /me/playlists".
   limitMatching: (
     match: (method: string, path: string) => boolean,
@@ -115,6 +122,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
   type Matcher = (method: string, path: string) => boolean;
   const always: Matcher = () => true;
   let limited = { times: 0, retryAfter: 0, match: always };
+  let failing: { match: Matcher; status: number } | undefined;
   const calls: Call[] = [];
   let base = "";
 
@@ -272,6 +280,10 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       path: `${path}${url.search}`,
       userId,
     });
+    if (failing?.match(request.method ?? "", path) === true) {
+      reply(response, failing.status, { error: { status: failing.status } });
+      return;
+    }
     if (limited.times > 0 && limited.match(request.method ?? "", path)) {
       limited.times -= 1;
       reply(
@@ -326,11 +338,33 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
         reply(response, 403, { error: { status: 403 } });
         return;
       }
-      const entries = playlist.entries.map((entry) => ({
-        added_at: entry.addedAt,
-        is_local: false,
-        item: track(entry.albumId, entry.index),
+      // A local file's track carries an album with no id, as Spotify's does.
+      const local = Array.from({ length: playlist.localFiles }, (_, index) => ({
+        added_at: "2020-01-01T00:00:00Z",
+        is_local: true,
+        item: {
+          id: null,
+          uri: `spotify:local:Someone:Something:Track+${String(index)}:200`,
+          type: "track",
+          is_local: true,
+          album: {
+            id: null,
+            uri: null,
+            name: "Something",
+            artists: [],
+            images: [],
+            total_tracks: 0,
+          },
+        },
       }));
+      const entries = [
+        ...local,
+        ...playlist.entries.map((entry) => ({
+          added_at: entry.addedAt,
+          is_local: false,
+          item: track(entry.albumId, entry.index),
+        })),
+      ];
       reply(
         response,
         200,
@@ -448,6 +482,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
         public: body.public ?? true,
         snapshot: 1,
         entries: [],
+        localFiles: 0,
       });
       user.library.unshift(id);
       reply(response, 201, { id, snapshot_id: "snap1", name: body.name });
@@ -533,6 +568,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
           ...entry,
           addedAt: `2020-01-${String(10 + (index % 18))}T00:00:00Z`,
         })),
+        localFiles: playlist.localFiles ?? 0,
         ...(playlist.images === undefined ? {} : { images: playlist.images }),
       });
       userOf(ownerId).library.push(playlist.id);
@@ -580,6 +616,9 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
     limitNext: (times, retryAfter) => {
       limited = { times, retryAfter, match: always };
     },
+    failMatching: (match, status) => {
+      failing = { match, status };
+    },
     limitMatching: (match, times, retryAfter) => {
       limited = { times, retryAfter, match };
     },
@@ -594,6 +633,7 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       refresh = new Map();
       codes = new Map();
       limited = { times: 0, retryAfter: 0, match: always };
+      failing = undefined;
       calls.length = 0;
     },
     close: () =>

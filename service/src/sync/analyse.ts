@@ -106,7 +106,7 @@ async function searchAlbums(
     `/search?type=album&limit=10&market=from_token&q=${encodeURIComponent(query)}`,
     searchSchema,
   );
-  return (answer.albums?.items ?? []).filter((album) => album !== null);
+  return answer.albums?.items.kept ?? [];
 }
 
 // For a playlist whose tracks cannot be read. A playlist made from one album

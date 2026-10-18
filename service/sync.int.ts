@@ -18,7 +18,7 @@ const tracks = (albumId: string, count: number, from = 1) =>
   }));
 
 // Two members and one outsider, with libraries much like the real ones.
-async function setUp(): Promise<void> {
+async function setUp(members: UserId[] = [thomas, matt]): Promise<void> {
   for (const [id, name, artist, count] of [
     ["Bully", "Lucky For You", "Bully", 10],
     ["Iceage", "Seek Shelter", "Iceage", 12],
@@ -83,11 +83,14 @@ async function setUp(): Promise<void> {
   });
   spotify.follow("thomas", "RCaro");
 
+  for (const id of members) await join(id);
+}
+
+async function join(id: UserId): Promise<void> {
   const { store } = ready();
-  for (const [id, name] of [
-    [thomas, "Thomas"],
-    [matt, "Matthew"],
-  ] as const) {
+  const names: Record<string, string> = { thomas: "Thomas", matt: "Matthew" };
+  const name = names[id] ?? id;
+  {
     const issued = spotify.tokensFor(id);
     await store.join(
       { id, name },
@@ -570,11 +573,79 @@ describe("limits and failures", () => {
         startedAt: new Date().toISOString(),
         retryAt: null,
         expiresAt: Math.floor(Date.now() / 1000) + 600,
+        progress: null,
       },
       new Date(),
     );
     await check();
     expect(spotify.calls).toEqual([]);
     expect(await store.getLastRun(thomas)).toBeUndefined();
+  });
+
+  it("skips local files in a playlist and still reads the rest", async () => {
+    await setUp();
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.addPlaylist("thomas", {
+      id: "TWall",
+      name: "The Smile – Wall of Eyes",
+      tracks: tracks("Wall", 8),
+      localFiles: 2,
+    });
+    await check();
+    expect(
+      (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
+    ).toContain("Wall");
+  });
+});
+
+describe("what the page sees", () => {
+  it("records how each run ended", async () => {
+    await setUp();
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      job: "check",
+      result: "finished",
+    });
+
+    await ready().store.endRun((await ready().store.getRun())?.runId ?? "");
+    spotify.limitNext(1, 3600);
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "paused",
+    });
+    expect((await ready().store.getOutcome())?.retryAt).not.toBeNull();
+  });
+
+  it("records a failed run, and frees the group", async () => {
+    await setUp();
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/me/albums",
+      400,
+    );
+    await check().catch(() => undefined);
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "failed",
+    });
+    expect(await ready().store.getRun()).toBeUndefined();
+  });
+
+  it("re-reads a member's playlists by their tracks once that member joins", async () => {
+    await setUp([thomas]);
+    await check();
+    const before = await ready().store.getVerdicts();
+    expect(before.get("MCable")?.method).not.toBe("tracks");
+
+    await join(matt);
+    await check();
+    const after = await ready().store.getVerdicts();
+    expect(after.get("MCable")?.method).toBe("tracks");
+    expect(
+      (await lastRun(thomas)).plan.follow.map((entry) => entry.playlistId),
+    ).toContain("MSmile");
   });
 });

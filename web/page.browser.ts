@@ -14,7 +14,13 @@ const status = (overrides: Partial<Status> = {}): Status => ({
     albumFirst: false,
     privatePlaylists: false,
   },
-  run: { state: "idle", job: null, startedAt: null, retryAt: null },
+  run: {
+    state: "idle",
+    job: null,
+    startedAt: null,
+    retryAt: null,
+    progress: null,
+  },
   last: {
     runId: "run00000001",
     madeAt: new Date().toISOString(),
@@ -57,6 +63,7 @@ const status = (overrides: Partial<Status> = {}): Status => ({
     },
     applied: null,
   },
+  outcome: null,
   ...overrides,
 });
 
@@ -136,6 +143,7 @@ describe("signed in", () => {
               job: "apply",
               startedAt: new Date().toISOString(),
               retryAt: null,
+              progress: null,
             },
           }),
         }),
@@ -184,6 +192,7 @@ describe("signed in", () => {
                     job: "check",
                     startedAt: new Date().toISOString(),
                     retryAt: null,
+                    progress: null,
                   },
                 }),
               }
@@ -249,5 +258,48 @@ describe("signed in", () => {
         .isDisabled(),
     ).toBe(true);
     expect(await page.getByText("Nothing to change").count()).toBe(1);
+  });
+
+  it("shows how far a run has got, and says when one failed", async () => {
+    let polls = 0;
+    const { page } = await openPage(
+      "/",
+      answering({
+        "GET /api/status": () => {
+          polls += 1;
+          return polls < 2
+            ? {
+                status: 200,
+                body: status({
+                  last: null,
+                  run: {
+                    state: "running",
+                    job: "check",
+                    startedAt: new Date().toISOString(),
+                    retryAt: null,
+                    progress: { stage: "identifying", done: 240, total: 1130 },
+                  },
+                }),
+              }
+            : {
+                status: 200,
+                body: status({
+                  last: null,
+                  outcome: {
+                    runId: "run00000002",
+                    job: "check",
+                    finishedAt: new Date().toISOString(),
+                    result: "failed",
+                    retryAt: null,
+                  },
+                }),
+              };
+        },
+      }),
+    );
+    await page.getByText("Looking at playlists: 240 of 1,130.").waitFor();
+    await page
+      .getByText(/^The last check stopped with an error today at/u)
+      .waitFor({ timeout: 10_000 });
   });
 });

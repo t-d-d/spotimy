@@ -12,12 +12,17 @@ import {
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
   defaultSettings,
   jobs,
   lastRunSchema,
+  outcomeSchema,
+  progressSchema,
+  type Outcome,
+  type Progress,
   settingsSchema,
   type LastRun,
   type Settings,
@@ -58,6 +63,7 @@ export const runSchema = z.object({
   retryAt: z.string().nullable(),
   // Seconds since the epoch. Past this, another run may take over.
   expiresAt: z.number(),
+  progress: progressSchema.nullable().default(null),
 });
 
 export type RunState = z.infer<typeof runSchema>;
@@ -85,7 +91,11 @@ export interface Store {
   // Takes the group's one run, if it is free, lapsed or already this run's.
   takeRun: (run: RunState, now: Date) => Promise<boolean>;
   pauseRun: (runId: string, retryAt: Date) => Promise<void>;
+  // Only while the run holds the lock.
+  setProgress: (runId: string, progress: Progress) => Promise<void>;
   endRun: (runId: string) => Promise<void>;
+  getOutcome: () => Promise<Outcome | undefined>;
+  putOutcome: (outcome: Outcome) => Promise<void>;
   // Deletes everything the person's key holds, their membership, and what
   // was found about the playlists they own.
   leave: (id: UserId) => Promise<void>;
@@ -339,6 +349,29 @@ export function createStore(config: {
         expiresAt: seconds(retryAt),
       });
     },
+
+    setProgress: async (runId, progress) => {
+      try {
+        await db.send(
+          new UpdateCommand({
+            TableName,
+            Key: keys.run(),
+            UpdateExpression: "SET progress = :progress",
+            ConditionExpression: "runId = :runId",
+            ExpressionAttributeValues: {
+              ":progress": progress,
+              ":runId": runId,
+            },
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof ConditionalCheckFailedException)) throw error;
+      }
+    },
+
+    getOutcome: () => get(keys.outcome(), outcomeSchema),
+
+    putOutcome: (outcome) => put(keys.outcome(), outcome),
 
     endRun: async (runId) => {
       try {

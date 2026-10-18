@@ -10,7 +10,8 @@ apart from what the group shares, and every read is along a key.
 
 - Partition keys: GROUP, and USER#<id> for each person.
 - Under GROUP: MEMBER#<id> for each member, PLAYLIST#<id> for what a
-  playlist was found to be, and RUN for the one run in progress.
+  playlist was found to be, RUN for the one run in progress and how far
+  it has got, and OUTCOME for how the last run ended.
 - Under USER#<id>: PROFILE (name and settings), TOKEN (Spotify tokens),
   PLAN (the last run's plan and the person's last apply) and MEMORY
   (what the library held after the last run, what the person removed,
