@@ -4,15 +4,23 @@
 import type { z } from "zod";
 import type { Outcome, Plan, Progress } from "../../../shared/page-api";
 import type { jobSchema } from "../jobs";
-import { errorClass, type Logger } from "../log";
-import { RateLimited, type SpotifyClient } from "../spotify/client";
+import { errorClass, errorFields, type Logger } from "../log";
+import {
+  RateLimited,
+  SpotifyError,
+  type SpotifyClient,
+} from "../spotify/client";
 import {
   playlistSummarySchema,
   savedAlbumSchema,
   type PlaylistSummary,
 } from "../spotify/schemas";
 import type { Member, RunState, Store } from "../store/store";
-import { analyseTracks, createFollowedReader, identifyByName } from "./analyse";
+import {
+  analyseTracks,
+  createFollowedReader,
+  createNameReader,
+} from "./analyse";
 import { applyActions, type Change } from "./apply";
 import {
   albumKey,
@@ -133,7 +141,7 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     }
     await ended("failed");
     await store.endRun(job.runId);
-    log.error("run-failed", { ...fields, errorClass: errorClass(error) });
+    log.error("run-failed", { ...fields, ...errorFields(error) });
     throw error;
   }
 }
@@ -227,6 +235,9 @@ async function work(
   const followedReader = createFollowedReader(() => {
     log.info("followed-tracks-unreadable", fields);
   });
+  const nameReader = createNameReader((status) => {
+    log.warn("name-search-refused", { ...fields, status });
+  });
   const seen = new Set<string>();
   const toRead: { reader: Reader; playlist: PlaylistSummary }[] = [];
   for (const reader of readers) {
@@ -251,14 +262,25 @@ async function work(
       }
       if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
       const owner = owners.get(playlist.owner.id);
-      const verdict =
-        owner === undefined
-          ? ((await followedReader(reader.client, playlist)) ??
-            (await identifyByName(reader.client, playlist)))
-          : await analyseTracks(owner.client, playlist);
+      read += 1;
+      let verdict: Verdict | undefined;
+      try {
+        verdict =
+          owner === undefined
+            ? ((await followedReader(reader.client, playlist)) ??
+              (await nameReader(reader.client, playlist)))
+            : await analyseTracks(owner.client, playlist);
+      } catch (error) {
+        // Spotify refused this playlist alone. It is not cached, so the
+        // next run tries it again.
+        if (!(error instanceof SpotifyError) || error.status >= 500) {
+          throw error;
+        }
+        log.warn("playlist-unreadable", { ...fields, ...errorFields(error) });
+      }
+      if (verdict === undefined) continue;
       verdicts.set(playlist.id, verdict);
       pending.push(verdict);
-      read += 1;
       if (pending.length >= 10) await flush();
     }
   } finally {

@@ -87,12 +87,12 @@ export interface FakeSpotify {
   limitNext: (times: number, retryAfter: number) => void;
   // Answers calls that match with this status, as Spotify might in a bad hour.
   failMatching: (
-    match: (method: string, path: string) => boolean,
+    match: (method: string, path: string, query: URLSearchParams) => boolean,
     status: number,
   ) => void;
   // As limitNext, but only for calls that match, such as "POST /me/playlists".
   limitMatching: (
-    match: (method: string, path: string) => boolean,
+    match: (method: string, path: string, query: URLSearchParams) => boolean,
     times: number,
     retryAfter: number,
   ) => void;
@@ -119,7 +119,11 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
     string,
     { userId: string; challenge: string; redirectUri: string }
   >();
-  type Matcher = (method: string, path: string) => boolean;
+  type Matcher = (
+    method: string,
+    path: string,
+    query: URLSearchParams,
+  ) => boolean;
   const always: Matcher = () => true;
   let limited = { times: 0, retryAfter: 0, match: always };
   let failing: { match: Matcher; status: number } | undefined;
@@ -280,11 +284,14 @@ export async function startFakeSpotify(): Promise<FakeSpotify> {
       path: `${path}${url.search}`,
       userId,
     });
-    if (failing?.match(request.method ?? "", path) === true) {
+    if (failing?.match(request.method ?? "", path, url.searchParams) === true) {
       reply(response, failing.status, { error: { status: failing.status } });
       return;
     }
-    if (limited.times > 0 && limited.match(request.method ?? "", path)) {
+    if (
+      limited.times > 0 &&
+      limited.match(request.method ?? "", path, url.searchParams)
+    ) {
       limited.times -= 1;
       reply(
         response,

@@ -8,7 +8,7 @@ import {
 } from "../../shared/page-api";
 import type { UserId } from "./ids";
 import { newRunId } from "./jobs";
-import { errorClass, type Logger } from "./log";
+import { errorFields, type Logger } from "./log";
 import type { Route } from "./routes";
 import type { Services } from "./services";
 import {
@@ -151,17 +151,22 @@ async function finishSignIn(call: Call, services: Services): Promise<Response> {
   const query = new URL(call.request.url).searchParams;
   const login = await sessions.verifyLogin(call.cookies.get(loginCookie));
   const code = query.get("code");
-  const failed = (reason: string, errorName: string) => {
-    log.info("sign-in-refused", { errorClass: errorName });
+  const failed = (
+    reason: string,
+    error: { errorClass: string; status?: number },
+  ) => {
+    log.info("sign-in-refused", error);
     return redirect(`/?signin=${reason}`, [clearCookie(loginCookie)]);
   };
-  if (query.get("error") !== null) return failed("cancelled", "Cancelled");
+  if (query.get("error") !== null) {
+    return failed("cancelled", { errorClass: "Cancelled" });
+  }
   if (
     login === undefined ||
     code === null ||
     query.get("state") !== login.state
   ) {
-    return failed("failed", "StateMismatch");
+    return failed("failed", { errorClass: "StateMismatch" });
   }
   let answer;
   try {
@@ -173,10 +178,12 @@ async function finishSignIn(call: Call, services: Services): Promise<Response> {
       verifier: login.verifier,
     });
   } catch (error) {
-    return failed("failed", errorClass(error));
+    return failed("failed", errorFields(error));
   }
   const tokens = storedTokens(answer, now());
-  if (tokens === undefined) return failed("failed", "NoRefreshToken");
+  if (tokens === undefined) {
+    return failed("failed", { errorClass: "NoRefreshToken" });
+  }
   const client = createSpotifyClient({
     apiBase: env.spotifyApiBase,
     log,
@@ -191,9 +198,9 @@ async function finishSignIn(call: Call, services: Services): Promise<Response> {
   } catch (error) {
     // A development-mode app answers 403 for an account not on its list.
     if (error instanceof SpotifyError && error.status === 403) {
-      return failed("not-allowed", "NotOnList");
+      return failed("not-allowed", { errorClass: "NotOnList", status: 403 });
     }
-    return failed("failed", errorClass(error));
+    return failed("failed", errorFields(error));
   }
   await store.join(
     { id: me.id, name: me.display_name ?? me.id },

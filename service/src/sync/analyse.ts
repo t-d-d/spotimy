@@ -147,6 +147,31 @@ export async function identifyByName(
     : fromAlbum(playlist, byName, "name");
 }
 
+// Finds playlists by name, and stops for the rest of the run once Spotify
+// refuses search outright (403), or three searches in a row. One refused
+// search skips its playlist alone, which is tried again next run.
+export function createNameReader(onRefused: (status: number) => void) {
+  let refusedInARow = 0;
+  let allowed = true;
+  return async (
+    client: SpotifyClient,
+    playlist: PlaylistSummary,
+  ): Promise<Verdict | undefined> => {
+    if (!allowed) return undefined;
+    try {
+      const verdict = await identifyByName(client, playlist);
+      refusedInARow = 0;
+      return verdict;
+    } catch (error) {
+      if (!(error instanceof SpotifyError) || error.status >= 500) throw error;
+      onRefused(error.status);
+      refusedInARow += 1;
+      if (error.status === 403 || refusedInARow >= 3) allowed = false;
+      return undefined;
+    }
+  };
+}
+
 // A development-mode app made since February 2026 cannot read the tracks of
 // a playlist its user does not own. One made before may still. This tries,
 // and after a refusal, or three empty answers in a row, stops trying for the

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLogger, errorClass } from "./log";
+import { createLogger, errorClass, errorFields } from "./log";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -35,5 +35,14 @@ describe("the logger", () => {
       errorClass(Object.assign(new Error("x"), { code: "ECONNRESET" })),
     ).toBe("ECONNRESET");
     expect(errorClass("text")).toBe("string");
+  });
+
+  it("gives a dependency's status with its class, when it has one", () => {
+    expect(
+      errorFields(Object.assign(new Error("secret"), { status: 403 })),
+    ).toEqual({ errorClass: "Error", status: 403 });
+    expect(errorFields(new TypeError("secret"))).toEqual({
+      errorClass: "TypeError",
+    });
   });
 });

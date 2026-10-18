@@ -2,7 +2,7 @@
 // person asks (hosting.md).
 import { z } from "zod";
 import { jobSchema, newRunId } from "./jobs";
-import { createLogger, errorClass } from "./log";
+import { createLogger, errorFields } from "./log";
 import { ready } from "./services";
 import { runGroup, type Job } from "./sync/run";
 
@@ -59,7 +59,7 @@ export async function handler(
     // runGroup has logged it and freed the lock. Async invokes are not
     // retried (serverless.yml), so nothing runs twice.
     log.error("request-failed", {
-      errorClass: errorClass(error),
+      ...errorFields(error),
       runId: job.runId,
     });
   }

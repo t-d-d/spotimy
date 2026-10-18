@@ -30,6 +30,11 @@ export const events = [
   "spotify-retried",
   "spotify-rate-limited",
   "followed-tracks-unreadable",
+  // Spotify refused a call about one playlist. It is skipped this run.
+  "playlist-unreadable",
+  // Spotify refused a search by name. After a 403, or three in a row, the
+  // run stops searching.
+  "name-search-refused",
   // How far a run has got, or how it ended, could not be saved for the page.
   "progress-unwritten",
   "outcome-unwritten",
@@ -103,6 +108,24 @@ export function errorClass(error: unknown): string {
   const code = "code" in error ? error.code : undefined;
   const name = typeof code === "string" ? code : error.name;
   return /^[A-Za-z0-9_.:-]{1,64}$/u.test(name) ? name : "Error";
+}
+
+// An error's class, and the status a dependency answered with when it has
+// one, as logging.md asks. Never its message.
+export function errorFields(error: unknown): {
+  errorClass: string;
+  status?: number;
+} {
+  const status =
+    error instanceof Error &&
+    "status" in error &&
+    typeof error.status === "number" &&
+    Number.isInteger(error.status)
+      ? error.status
+      : undefined;
+  return status === undefined
+    ? { errorClass: errorClass(error) }
+    : { errorClass: errorClass(error), status };
 }
 
 // Tests and tools that need a logger and no lines.
