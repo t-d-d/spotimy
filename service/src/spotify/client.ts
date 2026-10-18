@@ -1,8 +1,8 @@
 // Spotify's Web API, paced and retried as spotify-api.md says.
 import type { z } from "zod";
-import { discardBody, requiredBody } from "../http";
+import { discardBody, optionalBody, requiredBody } from "../http";
 import type { Logger } from "../log";
-import { pageSchema } from "./schemas";
+import { errorAnswerSchema, pageSchema } from "./schemas";
 
 export interface TokenSource {
   current: () => Promise<string>;
@@ -10,12 +10,30 @@ export interface TokenSource {
   renew: () => Promise<string>;
 }
 
+// Why Spotify refused a call, matched from its message to a fixed code so
+// its words never reach a log line.
+const reasons: [RegExp, string][] = [
+  [/premium/iu, "PremiumRequired"],
+  [/scope/iu, "InsufficientScope"],
+  [/registered|dashboard/iu, "UserNotRegistered"],
+  [/^forbidden\.?$/iu, "Forbidden"],
+];
+
+const reasonOf = (message: string | undefined): string | undefined =>
+  message === undefined
+    ? undefined
+    : (reasons.find(([pattern]) => pattern.test(message))?.[1] ?? "Other");
+
 export class SpotifyError extends Error {
   override name = "SpotifyError";
   readonly status: number;
-  constructor(status: number, what: string) {
+  // The error's class with Spotify's reason, which the logger names it by.
+  readonly code: string;
+  constructor(status: number, what: string, message?: string) {
     super(`Spotify answered ${String(status)} to ${what}.`);
     this.status = status;
+    const reason = reasonOf(message);
+    this.code = reason === undefined ? this.name : `${this.name}:${reason}`;
   }
 }
 
@@ -108,7 +126,11 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
         continue;
       }
       if (response.ok) return response;
-      await discardBody(response);
+      // Spotify's reason for a refusal. A 429 says all it needs in its
+      // header.
+      let answer: { error: { message: string } } | undefined;
+      if (response.status === 429) await discardBody(response);
+      else answer = await optionalBody(response, errorAnswerSchema);
       if (response.status === 429) {
         const retryAfter = Math.max(
           1,
@@ -133,7 +155,7 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
         await sleep(1000 * attempt);
         continue;
       }
-      throw new SpotifyError(response.status, what);
+      throw new SpotifyError(response.status, what, answer?.error.message);
     }
   };
 

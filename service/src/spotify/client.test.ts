@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { silentLogger } from "../log";
+import { errorFields, silentLogger } from "../log";
 import { createSpotifyClient, RateLimited, SpotifyError } from "./client";
 
 const apiBase = "https://api.spotify.com/v1";
@@ -123,6 +123,44 @@ describe("the Spotify client", () => {
       ids.push(item.id);
     expect(ids).toEqual(["a", "b"]);
     expect(sent[1]?.url).toBe(`${apiBase}/me/playlists?offset=2`);
+  });
+
+  it("names Spotify's reason for a refusal by a fixed code, never its words", async () => {
+    const refusal = (message: string) => () =>
+      Response.json({ error: { status: 403, message } }, { status: 403 });
+    const caught = async (answer: () => Response) => {
+      const { send } = scripted([answer]);
+      return client(send)
+        .spotify.get("/search?q=x", meSchema)
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+    };
+
+    expect(
+      errorFields(
+        await caught(
+          refusal(
+            "Active premium subscription required for the owner of the app.",
+          ),
+        ),
+      ),
+    ).toEqual({ errorClass: "SpotifyError:PremiumRequired", status: 403 });
+    expect(
+      errorFields(await caught(refusal("Insufficient client scope"))),
+    ).toEqual({ errorClass: "SpotifyError:InsufficientScope", status: 403 });
+    expect(errorFields(await caught(refusal("Forbidden")))).toEqual({
+      errorClass: "SpotifyError:Forbidden",
+      status: 403,
+    });
+    const other = errorFields(await caught(refusal("Bully Lucky For You")));
+    expect(other).toEqual({ errorClass: "SpotifyError:Other", status: 403 });
+    expect(JSON.stringify(other)).not.toMatch(/Bully/u);
+    expect(errorFields(await caught(status(403)))).toEqual({
+      errorClass: "SpotifyError",
+      status: 403,
+    });
   });
 
   it("refuses a page with an item that does not fit, so a missing album is never taken for a removed one", async () => {
