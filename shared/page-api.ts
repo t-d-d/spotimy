@@ -102,6 +102,29 @@ export type LastRun = z.infer<typeof lastRunSchema>;
 
 export const runStates = ["idle", "running", "paused"] as const;
 
+// How far a run in progress has got, so the page can show it moving.
+export const progressSchema = z.object({
+  stage: z.enum(["reading", "identifying", "applying"]),
+  done: count,
+  total: count,
+});
+
+export type Progress = z.infer<typeof progressSchema>;
+
+// How the group's last run ended, so a run that failed or stopped early is
+// not silent. A run that dies without a word is left as stopped. An apply's
+// ending is for the person who pressed Apply.
+export const outcomeSchema = z.object({
+  runId: z.string(),
+  job: z.enum(jobs),
+  requestedBy: z.string().nullable(),
+  finishedAt: z.string(),
+  result: z.enum(["finished", "failed", "paused", "stopped"]),
+  retryAt: z.string().nullable(),
+});
+
+export type Outcome = z.infer<typeof outcomeSchema>;
+
 export const statusSchema = z.object({
   user: z.object({ id: z.string(), name: z.string() }),
   members: z.array(z.object({ id: z.string(), name: z.string() })),
@@ -111,8 +134,11 @@ export const statusSchema = z.object({
     job: z.enum(jobs).nullable(),
     startedAt: z.string().nullable(),
     retryAt: z.string().nullable(),
+    // Defaults, so the page still reads an older API during a rollback.
+    progress: progressSchema.nullable().default(null),
   }),
   last: lastRunSchema.nullable(),
+  outcome: outcomeSchema.nullable().default(null),
 });
 
 export type Status = z.infer<typeof statusSchema>;

@@ -2,7 +2,7 @@
 // playlist is, then plan for each person and apply where they said to
 // (sync-safety.md).
 import type { z } from "zod";
-import type { Plan } from "../../../shared/page-api";
+import type { Outcome, Plan, Progress } from "../../../shared/page-api";
 import type { jobSchema } from "../jobs";
 import { errorClass, type Logger } from "../log";
 import { RateLimited, type SpotifyClient } from "../spotify/client";
@@ -65,12 +65,36 @@ class OutOfTime extends Error {
 export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
   const { store, log, now } = deps;
   const fields = { runId: job.runId, job: job.kind };
+  // How the run ended, for the page. A failed write is logged, never thrown,
+  // so it cannot hide the run's own error or keep the group held.
+  const ended = async (
+    result: Outcome["result"],
+    retryAt: Date | null = null,
+  ) => {
+    try {
+      await store.putOutcome({
+        runId: job.runId,
+        job: job.kind,
+        requestedBy: job.requestedBy,
+        finishedAt: now().toISOString(),
+        result,
+        retryAt: retryAt?.toISOString() ?? null,
+      });
+    } catch (error) {
+      log.warn("outcome-unwritten", {
+        ...fields,
+        errorClass: errorClass(error),
+      });
+    }
+  };
   if (job.hop > maxHops) {
     log.warn("run-failed", { ...fields, errorClass: "TooManyHops" });
+    await ended("stopped");
     await store.endRun(job.runId);
     return { state: "stopped" };
   }
   const existing = await store.getRun();
+  const resumed = existing?.runId === job.runId ? existing.progress : null;
   const lock: RunState = {
     runId: job.runId,
     job: job.kind,
@@ -80,20 +104,26 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
       existing?.runId === job.runId ? existing.startedAt : now().toISOString(),
     retryAt: null,
     expiresAt: Math.floor(now().getTime() / 1000) + lockSeconds,
+    progress: resumed,
   };
   if (!(await store.takeRun(lock, now()))) {
     log.info("run-busy", fields);
     return { state: "busy" };
   }
   log.info(job.hop === 0 ? "run-started" : "run-continued", fields);
+  // Kept if this invocation dies without a word, or its next never comes,
+  // so the page says the run stopped. Every ending below replaces it.
+  await ended("stopped");
   try {
-    await work(job, deps);
+    await work(job, deps, resumed);
+    await ended("finished");
     await store.endRun(job.runId);
     log.info("run-finished", fields);
     return { state: "finished" };
   } catch (error) {
     if (error instanceof RateLimited) {
       const retryAt = new Date(now().getTime() + error.retryAfter * 1000);
+      await ended("paused", retryAt);
       await store.pauseRun(job.runId, retryAt);
       log.warn("run-paused", { ...fields, retryAfter: error.retryAfter });
       return { state: "paused", retryAt };
@@ -101,6 +131,7 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     if (error instanceof OutOfTime) {
       return { state: "continue", carried: error.carried };
     }
+    await ended("failed");
     await store.endRun(job.runId);
     log.error("run-failed", { ...fields, errorClass: errorClass(error) });
     throw error;
@@ -134,15 +165,38 @@ async function readLibrary(
   return { userId: member.id, playlists, saved };
 }
 
-async function work(job: Job, deps: RunDeps): Promise<void> {
+async function work(
+  job: Job,
+  deps: RunDeps,
+  resumed: Progress | null,
+): Promise<void> {
   const { store, log, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind };
+  // How far the run has got, for the page. Like an ending, a failed write
+  // is logged and the run goes on.
+  const progress = async (
+    stage: Progress["stage"],
+    done: number,
+    total: number,
+  ) => {
+    try {
+      await store.setProgress(job.runId, { stage, done, total });
+    } catch (error) {
+      log.warn("progress-unwritten", {
+        ...fields,
+        errorClass: errorClass(error),
+      });
+    }
+  };
 
-  // 1. Every member's library, read with their own token.
+  // 1. Every member's library, read with their own token. A later
+  //    invocation of the run reads them again without counting, so the
+  //    page's count never goes back.
   const members = await store.listMembers();
   const memberIds = new Set<string>(members.map((member) => member.id));
   const readers: Reader[] = [];
-  for (const member of members) {
+  for (const [index, member] of members.entries()) {
+    if (job.hop === 0) await progress("reading", index, members.length);
     const client = await deps.clientFor(member);
     if (client === undefined) continue;
     const library = await readLibrary(member, client);
@@ -153,6 +207,9 @@ async function work(job: Job, deps: RunDeps): Promise<void> {
       playlists: library.playlists.length,
       albums: library.saved.length,
     });
+  }
+  if (job.hop === 0) {
+    await progress("reading", members.length, members.length);
   }
 
   // 2. What each playlist is. A member's own playlist is read with its
@@ -171,27 +228,38 @@ async function work(job: Job, deps: RunDeps): Promise<void> {
     log.info("followed-tracks-unreadable", fields);
   });
   const seen = new Set<string>();
+  const toRead: { reader: Reader; playlist: PlaylistSummary }[] = [];
+  for (const reader of readers) {
+    for (const playlist of reader.library.playlists) {
+      if (seen.has(playlist.id)) continue;
+      seen.add(playlist.id);
+      if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
+        continue;
+      const owner = owners.get(playlist.owner.id);
+      if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
+      toRead.push({ reader, playlist });
+    }
+  }
+  // Counted against every playlist, so a later invocation counts on from
+  // what earlier ones found.
+  const known = seen.size - toRead.length;
   let read = 0;
   try {
-    for (const reader of readers) {
-      for (const playlist of reader.library.playlists) {
-        if (seen.has(playlist.id)) continue;
-        seen.add(playlist.id);
-        if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
-          continue;
-        const owner = owners.get(playlist.owner.id);
-        if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
-        if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
-        const verdict =
-          owner === undefined
-            ? ((await followedReader(reader.client, playlist)) ??
-              (await identifyByName(reader.client, playlist)))
-            : await analyseTracks(owner.client, playlist);
-        verdicts.set(playlist.id, verdict);
-        pending.push(verdict);
-        read += 1;
-        if (pending.length >= 10) await flush();
+    for (const { reader, playlist } of toRead) {
+      if (read % 10 === 0) {
+        await progress("identifying", known + read, seen.size);
       }
+      if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
+      const owner = owners.get(playlist.owner.id);
+      const verdict =
+        owner === undefined
+          ? ((await followedReader(reader.client, playlist)) ??
+            (await identifyByName(reader.client, playlist)))
+          : await analyseTracks(owner.client, playlist);
+      verdicts.set(playlist.id, verdict);
+      pending.push(verdict);
+      read += 1;
+      if (pending.length >= 10) await flush();
     }
   } finally {
     await flush();
@@ -219,10 +287,20 @@ async function work(job: Job, deps: RunDeps): Promise<void> {
     }),
   );
 
-  // 4. A plan for each person, applied where they said to.
+  // 4. A plan for each person, applied where they said to. Changes are
+  //    counted on from an earlier invocation of this run.
+  const changes: Counter = {
+    done: resumed?.stage === "applying" ? resumed.done : 0,
+    write: (done, total) => progress("applying", done, total),
+  };
   for (const reader of readers) {
-    await planFor(reader, group, verdicts, job, deps);
+    await planFor(reader, group, verdicts, job, deps, changes);
   }
+}
+
+interface Counter {
+  done: number;
+  write: (done: number, total: number) => Promise<void>;
 }
 
 async function planFor(
@@ -231,6 +309,7 @@ async function planFor(
   verdicts: Map<string, Verdict>,
   job: Job,
   deps: RunDeps,
+  changes: Counter,
 ): Promise<void> {
   const { store, log, now, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind, userId: member.id };
@@ -294,6 +373,13 @@ async function planFor(
     made: new Map<string, { playlistId: string; name: string }>(),
     filled: new Set<string>(),
   };
+  const total =
+    changes.done +
+    actions.save.length +
+    actions.follow.length +
+    actions.create.length +
+    actions.finish.length;
+  await changes.write(changes.done, total);
   const record = async (change: Change) => {
     switch (change.kind) {
       case "saved":
@@ -352,6 +438,11 @@ async function planFor(
       }
     }
     await store.putMemberState(member.id, { memory });
+    // Counted once what changed is in MEMORY. A playlist counts when filled.
+    if (change.kind !== "made") {
+      changes.done += 1;
+      await changes.write(changes.done, total);
+    }
   };
 
   const outcome = await applyActions({

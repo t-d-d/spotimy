@@ -125,6 +125,20 @@ describe("the Spotify client", () => {
     expect(sent[1]?.url).toBe(`${apiBase}/me/playlists?offset=2`);
   });
 
+  it("refuses a page with an item that does not fit, so a missing album is never taken for a removed one", async () => {
+    const { send } = scripted([
+      ok({ items: [{ id: "a" }, { name: "no id" }], next: null }),
+    ]);
+    const { spotify } = client(send);
+    const pages = async () => {
+      const seen: string[] = [];
+      for await (const item of spotify.pages("/me/albums", meSchema))
+        seen.push(item.id);
+      return seen;
+    };
+    await expect(pages()).rejects.toThrow(/schema/u);
+  });
+
   it("never sends the token to a next link off the API", async () => {
     const { send, sent } = scripted([
       ok({ items: [], next: "https://evil.example/steal" }),

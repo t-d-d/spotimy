@@ -30,6 +30,9 @@ export const events = [
   "spotify-retried",
   "spotify-rate-limited",
   "followed-tracks-unreadable",
+  // How far a run has got, or how it ended, could not be saved for the page.
+  "progress-unwritten",
+  "outcome-unwritten",
 ] as const;
 
 export type Event = (typeof events)[number];

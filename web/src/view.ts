@@ -24,8 +24,53 @@ export function runLine(status: Status, now: Date): string {
   if (run.state === "paused" && run.retryAt !== null) {
     return `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept.`;
   }
-  if (last === null) return "Not checked yet.";
+  if (last === null) {
+    return "Not checked yet. Press Check now to see what spotimy would change.";
+  }
   return `Last checked ${time(last.madeAt, now)}.`;
+}
+
+const counted = (count: number) => count.toLocaleString("en-GB");
+
+// How far the run in progress has got.
+export function progressLine(status: Status): string | undefined {
+  const { run } = status;
+  if (run.state !== "running" || run.progress === null) return undefined;
+  const { stage, done, total } = run.progress;
+  const what = {
+    reading: "Reading libraries",
+    identifying: "Looking at playlists",
+    applying: "Making changes",
+  }[stage];
+  return `${what}: ${counted(done)} of ${counted(total)}.`;
+}
+
+// Why the last run ended early, until a newer plan shows a later run worked.
+// A check is everyone's. An apply is only the person's who pressed Apply.
+export function outcomeLine(status: Status, now: Date): string | undefined {
+  const { outcome, last, run, user } = status;
+  if (outcome === null || run.state !== "idle") return undefined;
+  if (outcome.result === "finished") return undefined;
+  if (last !== null && last.madeAt > outcome.finishedAt) return undefined;
+  if (outcome.job === "apply") {
+    if (outcome.requestedBy !== user.id) return undefined;
+    switch (outcome.result) {
+      case "failed":
+        return `Your last apply stopped with an error ${time(outcome.finishedAt, now)}. What it did is kept, so press Apply these changes to try again.`;
+      case "stopped":
+        return "Your last apply stopped before it finished. What it did is kept, so press Apply these changes to carry on.";
+      case "paused":
+        return "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply these changes to carry on.";
+    }
+  }
+  switch (outcome.result) {
+    case "failed":
+      return `The last check stopped with an error ${time(outcome.finishedAt, now)}. Press Check now to try again.`;
+    case "stopped":
+      return "The last check stopped before it finished. What it found is kept, so press Check now to carry on.";
+    case "paused":
+      return "Spotify asked spotimy to wait, so the last check stopped early. What it found is kept, so press Check now to carry on.";
+  }
 }
 
 export const hasWork = (plan: Plan): boolean =>

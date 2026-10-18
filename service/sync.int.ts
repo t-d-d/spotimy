@@ -2,6 +2,8 @@
 // and the real Spotify client talking to the fake Spotify.
 import { describe, expect, it } from "vitest";
 import { userIdSchema, type UserId } from "./src/ids";
+import type { Outcome } from "../shared/page-api";
+import type { RunState } from "./src/store/store";
 import type { Job } from "./src/worker";
 import { ready } from "./src/services";
 import { handler } from "./src/worker";
@@ -18,7 +20,7 @@ const tracks = (albumId: string, count: number, from = 1) =>
   }));
 
 // Two members and one outsider, with libraries much like the real ones.
-async function setUp(): Promise<void> {
+async function setUp(members: UserId[] = [thomas, matt]): Promise<void> {
   for (const [id, name, artist, count] of [
     ["Bully", "Lucky For You", "Bully", 10],
     ["Iceage", "Seek Shelter", "Iceage", 12],
@@ -83,18 +85,18 @@ async function setUp(): Promise<void> {
   });
   spotify.follow("thomas", "RCaro");
 
+  for (const id of members) await join(id);
+}
+
+async function join(id: UserId): Promise<void> {
   const { store } = ready();
-  for (const [id, name] of [
-    [thomas, "Thomas"],
-    [matt, "Matthew"],
-  ] as const) {
-    const issued = spotify.tokensFor(id);
-    await store.join(
-      { id, name },
-      { ...issued, expiresAt: Date.now() + 3_600_000 },
-      new Date(),
-    );
-  }
+  const names: Record<string, string> = { thomas: "Thomas", matt: "Matthew" };
+  const issued = spotify.tokensFor(id);
+  await store.join(
+    { id, name: names[id] ?? id },
+    { ...issued, expiresAt: Date.now() + 3_600_000 },
+    new Date(),
+  );
 }
 
 const context = (remaining: () => number = () => 600_000) => ({
@@ -570,11 +572,183 @@ describe("limits and failures", () => {
         startedAt: new Date().toISOString(),
         retryAt: null,
         expiresAt: Math.floor(Date.now() / 1000) + 600,
+        progress: null,
       },
       new Date(),
     );
     await check();
     expect(spotify.calls).toEqual([]);
     expect(await store.getLastRun(thomas)).toBeUndefined();
+  });
+
+  it("skips local files in a playlist and still reads the rest", async () => {
+    await setUp();
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.addPlaylist("thomas", {
+      id: "TWall",
+      name: "The Smile – Wall of Eyes",
+      tracks: tracks("Wall", 8),
+      localFiles: 2,
+    });
+    await check();
+    expect(
+      (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
+    ).toContain("Wall");
+  });
+});
+
+describe("what the page sees", () => {
+  it("records how each run ended", async () => {
+    await setUp();
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      job: "check",
+      result: "finished",
+    });
+
+    await ready().store.endRun((await ready().store.getRun())?.runId ?? "");
+    spotify.limitNext(1, 3600);
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "paused",
+    });
+    expect((await ready().store.getOutcome())?.retryAt).not.toBeNull();
+  });
+
+  it("records a failed run, and frees the group", async () => {
+    await setUp();
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/me/albums",
+      400,
+    );
+    await check().catch(() => undefined);
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "failed",
+    });
+    expect(await ready().store.getRun()).toBeUndefined();
+  });
+
+  it("leaves a stopped ending on record when a run's next invocation never comes", async () => {
+    await setUp();
+    await check(() => 1000);
+    const outcome = await ready().store.getOutcome();
+    expect(outcome).toMatchObject({
+      job: "check",
+      requestedBy: "thomas",
+      result: "stopped",
+    });
+    expect(lambda.invoked).toEqual([
+      expect.objectContaining({ runId: outcome?.runId, hop: 1 }),
+    ]);
+  });
+
+  it("counts playlists on across invocations, never back", async () => {
+    await setUp();
+    // Time runs short once three playlists have been read.
+    const read = () =>
+      new Set(
+        spotify.calls.flatMap(
+          (call) => /^\/playlists\/([^/]+)\/items/u.exec(call.path)?.[1] ?? [],
+        ),
+      ).size;
+    await check(() => (read() >= 3 ? 1000 : 600_000));
+    expect((await ready().store.getRun())?.progress).toMatchObject({
+      stage: "identifying",
+      total: 6,
+    });
+    const next = lambda.invoked[0];
+    if (next === undefined) throw new Error("The run did not carry on.");
+    await handler(
+      next,
+      context(() => 1000),
+    );
+    expect((await ready().store.getRun())?.progress).toEqual({
+      stage: "identifying",
+      done: 3,
+      total: 6,
+    });
+  });
+
+  it("counts changes on across invocations, never back", async () => {
+    await setUp();
+    spotify.addAlbum({
+      id: "Wall",
+      name: "Wall of Eyes",
+      artists: ["The Smile"],
+      tracks: 8,
+    });
+    spotify.save("thomas", "Wall", "2026-10-01T00:00:00Z");
+    await check();
+    // Four saves, one follow and one new playlist, then time runs short.
+    await apply(thomas, () =>
+      spotify.calls.some(
+        (call) => call.method === "POST" && call.path === "/me/playlists",
+      )
+        ? 1000
+        : 600_000,
+    );
+    const counted = { stage: "applying", done: 6, total: 7 };
+    expect((await ready().store.getRun())?.progress).toEqual(counted);
+    const next = lambda.invoked[0];
+    if (next === undefined) throw new Error("The apply did not carry on.");
+    await handler(
+      next,
+      context(() => 1000),
+    );
+    expect((await ready().store.getRun())?.progress).toEqual(counted);
+  });
+});
+
+describe("the run's record", () => {
+  const holding = (runId: string): RunState => ({
+    runId,
+    job: "check",
+    requestedBy: thomas,
+    state: "running",
+    startedAt: new Date().toISOString(),
+    retryAt: null,
+    expiresAt: Math.floor(Date.now() / 1000) + 600,
+    progress: null,
+  });
+  const ending = (runId: string): Outcome => ({
+    runId,
+    job: "check",
+    requestedBy: thomas,
+    finishedAt: new Date().toISOString(),
+    result: "failed",
+    retryAt: null,
+  });
+
+  it("takes progress and an ending only from the run that holds the group", async () => {
+    const { store } = ready();
+    await store.takeRun(holding("holder000001"), new Date());
+    await store.setProgress("lapsed000001", {
+      stage: "reading",
+      done: 1,
+      total: 2,
+    });
+    await store.putOutcome(ending("lapsed000001"));
+    expect((await store.getRun())?.progress).toBeNull();
+    expect(await store.getOutcome()).toBeUndefined();
+
+    await store.putOutcome(ending("holder000001"));
+    expect((await store.getOutcome())?.runId).toBe("holder000001");
+  });
+
+  it("never brings back a run that has ended", async () => {
+    const { store } = ready();
+    await store.takeRun(holding("holder000001"), new Date());
+    await store.endRun("holder000001");
+    await store.setProgress("holder000001", {
+      stage: "reading",
+      done: 1,
+      total: 2,
+    });
+    expect(await store.getRun()).toBeUndefined();
   });
 });

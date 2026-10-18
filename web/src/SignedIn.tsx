@@ -12,7 +12,14 @@ import {
 import styles from "./Page.module.css";
 import { PlanView } from "./PlanView";
 import { SettingsForm } from "./SettingsForm";
-import { appliedLine, byYear, hasWork, runLine } from "./view";
+import {
+  appliedLine,
+  byYear,
+  hasWork,
+  outcomeLine,
+  progressLine,
+  runLine,
+} from "./view";
 
 interface Props {
   status: Status;
@@ -26,6 +33,8 @@ export function SignedIn({ status, show, reload }: Props) {
   const idle = run.state === "idle";
   const now = new Date();
   const applied = last === null ? undefined : appliedLine(last, now);
+  const progress = progressLine(status);
+  const ended = outcomeLine(status, now);
   const made = last?.applied?.created ?? [];
 
   const act = async (action: () => Promise<Status>) => {
@@ -85,6 +94,16 @@ export function SignedIn({ status, show, reload }: Props) {
         <h2 id="run" className={styles.section}>
           {runLine(status, now)}
         </h2>
+        {progress === undefined ? null : (
+          <p className={styles.lede} role="status">
+            {progress}
+          </p>
+        )}
+        {ended === undefined ? null : (
+          <p className={styles.note} role="status">
+            {ended}
+          </p>
+        )}
         {applied === undefined ? null : (
           <p className={styles.lede}>{applied}</p>
         )}

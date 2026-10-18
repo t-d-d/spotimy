@@ -31,13 +31,27 @@ export const albumSchema = z.object({
 
 export type Album = z.infer<typeof albumSchema>;
 
-export const trackSchema = simpleTrackSchema.extend({
-  album: albumSchema.optional(),
-});
+// A local file's album has no id, and a local file is never part of an
+// album on Spotify, so its album is not read. Any other track's album must
+// fit.
+const withoutLocalAlbum = (value: unknown): unknown =>
+  typeof value === "object" &&
+  value !== null &&
+  "is_local" in value &&
+  value.is_local === true
+    ? { ...value, album: undefined }
+    : value;
+
+export const trackSchema = z.preprocess(
+  withoutLocalAlbum,
+  simpleTrackSchema.extend({ album: albumSchema.optional() }),
+);
 
 export type Track = z.infer<typeof trackSchema>;
 
-// A page's items may hold nulls, for content since removed.
+// A page's items may hold nulls, for content since removed. Any other item
+// that does not fit fails the page: a saved album left out would look
+// removed by the person.
 export function pageSchema<T extends z.ZodType>(item: T) {
   return z.object({
     items: z.array(item.nullable()),
