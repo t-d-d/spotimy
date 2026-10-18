@@ -3,7 +3,7 @@
 // any reason, still remembers what it did.
 import type { UserId } from "../ids";
 import type { Logger } from "../log";
-import { errorClass } from "../log";
+import { errorFields } from "../log";
 import { RateLimited, type SpotifyClient } from "../spotify/client";
 import {
   createdPlaylistSchema,
@@ -161,7 +161,7 @@ export async function applyActions(config: {
         return false;
       }
       outcome.failed += size;
-      log.warn("apply-failed", { userId, errorClass: errorClass(error) });
+      log.warn("apply-failed", { userId, ...errorFields(error) });
       return true;
     }
   };

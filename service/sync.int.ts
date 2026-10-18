@@ -117,6 +117,7 @@ const job = (overrides: Partial<Job>): Job => ({
   hop: 0,
   approved: null,
   carried: null,
+  skipped: null,
   ...overrides,
 });
 
@@ -599,6 +600,100 @@ describe("limits and failures", () => {
     expect(
       (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
     ).toContain("Wall");
+  });
+});
+
+describe("refusals about one playlist", () => {
+  const searches = () =>
+    spotify.calls.filter((call) => call.path.startsWith("/search"));
+
+  it("skips a playlist whose search Spotify refuses, plans the rest, and tries it again next run", async () => {
+    await setUp();
+    let refusing = true;
+    spotify.failMatching(
+      (method, path, query) =>
+        refusing &&
+        method === "GET" &&
+        path === "/search" &&
+        (query.get("q") ?? "").includes("Desire"),
+      400,
+    );
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    const saves = (await lastRun(thomas)).plan.save.map(
+      (entry) => entry.albumId,
+    );
+    expect(saves).toEqual(expect.arrayContaining(["Bully", "Cable", "Smile"]));
+    expect(saves).not.toContain("Caro");
+    expect((await ready().store.getVerdicts()).has("RCaro")).toBe(false);
+
+    refusing = false;
+    await check();
+    expect(
+      (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
+    ).toContain("Caro");
+  });
+
+  it("stops searching by name for the rest of the run once Spotify refuses search", async () => {
+    await setUp();
+    spotify.addPlaylist("rich", {
+      id: "RKath",
+      name: "Kathryn Joseph – for you who are the wronged",
+      tracks: tracks("Kath", 8),
+      images: [{ url: coverUrl("Kath") }],
+    });
+    spotify.follow("thomas", "RKath");
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/search",
+      403,
+    );
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    expect(searches()).toHaveLength(1);
+  });
+
+  it("keeps what it skipped for the whole run, across invocations", async () => {
+    await setUp();
+    spotify.addPlaylist("rich", {
+      id: "RKath",
+      name: "Kathryn Joseph – for you who are the wronged",
+      tracks: tracks("Kath", 8),
+      images: [{ url: coverUrl("Kath") }],
+    });
+    spotify.follow("thomas", "RKath");
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/search",
+      403,
+    );
+    // Time runs short straight after the refused search.
+    await check(() => (searches().length > 0 ? 1000 : 600_000));
+    const next = lambda.invoked[0];
+    if (next === undefined) throw new Error("The run did not carry on.");
+    await handler(next, context());
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    expect(searches()).toHaveLength(1);
+  });
+
+  it("skips a member's playlist Spotify will not read, and plans the rest", async () => {
+    await setUp();
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/playlists/TIceage/items",
+      404,
+    );
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    expect(
+      (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
+    ).toContain("Bully");
+    expect((await ready().store.getVerdicts()).has("TIceage")).toBe(false);
   });
 });
 

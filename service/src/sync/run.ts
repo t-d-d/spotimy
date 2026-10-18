@@ -4,15 +4,23 @@
 import type { z } from "zod";
 import type { Outcome, Plan, Progress } from "../../../shared/page-api";
 import type { jobSchema } from "../jobs";
-import { errorClass, type Logger } from "../log";
-import { RateLimited, type SpotifyClient } from "../spotify/client";
+import { errorClass, errorFields, type Logger } from "../log";
+import {
+  RateLimited,
+  SpotifyError,
+  type SpotifyClient,
+} from "../spotify/client";
 import {
   playlistSummarySchema,
   savedAlbumSchema,
   type PlaylistSummary,
 } from "../spotify/schemas";
 import type { Member, RunState, Store } from "../store/store";
-import { analyseTracks, createFollowedReader, identifyByName } from "./analyse";
+import {
+  analyseTracks,
+  createFollowedReader,
+  createNameReader,
+} from "./analyse";
 import { applyActions, type Change } from "./apply";
 import {
   albumKey,
@@ -27,10 +35,11 @@ import { isWholeAlbum, type Verdict } from "./verdict";
 
 export type Job = z.infer<typeof jobSchema>;
 type Carried = NonNullable<Job["carried"]>;
+type Skipped = NonNullable<Job["skipped"]>;
 
 export type RunResult =
   | { state: "finished" }
-  | { state: "continue"; carried: Carried | null }
+  | { state: "continue"; carried: Carried | null; skipped: Skipped }
   | { state: "paused"; retryAt: Date }
   | { state: "busy" }
   | { state: "stopped" };
@@ -111,11 +120,16 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     return { state: "busy" };
   }
   log.info(job.hop === 0 ? "run-started" : "run-continued", fields);
+  // Left alone until the run ends, so it is handed to the next invocation.
+  const skipping: Skipping = {
+    playlists: new Set(job.skipped?.playlists ?? []),
+    searchRefusals: job.skipped?.searchRefusals ?? 0,
+  };
   // Kept if this invocation dies without a word, or its next never comes,
   // so the page says the run stopped. Every ending below replaces it.
   await ended("stopped");
   try {
-    await work(job, deps, resumed);
+    await work(job, deps, resumed, skipping);
     await ended("finished");
     await store.endRun(job.runId);
     log.info("run-finished", fields);
@@ -129,13 +143,25 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
       return { state: "paused", retryAt };
     }
     if (error instanceof OutOfTime) {
-      return { state: "continue", carried: error.carried };
+      return {
+        state: "continue",
+        carried: error.carried,
+        skipped: {
+          playlists: [...skipping.playlists],
+          searchRefusals: skipping.searchRefusals,
+        },
+      };
     }
     await ended("failed");
     await store.endRun(job.runId);
-    log.error("run-failed", { ...fields, errorClass: errorClass(error) });
+    log.error("run-failed", { ...fields, ...errorFields(error) });
     throw error;
   }
+}
+
+interface Skipping {
+  playlists: Set<string>;
+  searchRefusals: number;
 }
 
 interface Reader {
@@ -169,6 +195,7 @@ async function work(
   job: Job,
   deps: RunDeps,
   resumed: Progress | null,
+  skipping: Skipping,
 ): Promise<void> {
   const { store, log, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind };
@@ -224,8 +251,14 @@ async function work(
   const owners = new Map<string, Reader>(
     readers.map((reader) => [reader.member.id, reader]),
   );
-  const followedReader = createFollowedReader(() => {
-    log.info("followed-tracks-unreadable", fields);
+  const followedReader = createFollowedReader((status) => {
+    log.info("followed-tracks-unreadable", {
+      ...fields,
+      ...(status === undefined ? {} : { status }),
+    });
+  });
+  const nameReader = createNameReader(skipping, (status) => {
+    log.warn("name-search-refused", { ...fields, status });
   });
   const seen = new Set<string>();
   const toRead: { reader: Reader; playlist: PlaylistSummary }[] = [];
@@ -235,6 +268,7 @@ async function work(
       seen.add(playlist.id);
       if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
         continue;
+      if (skipping.playlists.has(playlist.id)) continue;
       const owner = owners.get(playlist.owner.id);
       if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
       toRead.push({ reader, playlist });
@@ -251,14 +285,33 @@ async function work(
       }
       if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
       const owner = owners.get(playlist.owner.id);
-      const verdict =
-        owner === undefined
-          ? ((await followedReader(reader.client, playlist)) ??
-            (await identifyByName(reader.client, playlist)))
-          : await analyseTracks(owner.client, playlist);
+      read += 1;
+      let verdict: Verdict | undefined;
+      try {
+        verdict =
+          owner === undefined
+            ? ((await followedReader(reader.client, playlist)) ??
+              (await nameReader(reader.client, playlist)))
+            : await analyseTracks(owner.client, playlist);
+      } catch (error) {
+        // Spotify refused this playlist alone. A 401 is the token's, not the
+        // playlist's, and a 5xx is Spotify's.
+        if (
+          !(error instanceof SpotifyError) ||
+          error.status === 401 ||
+          error.status >= 500
+        ) {
+          throw error;
+        }
+        log.warn("playlist-unreadable", { ...fields, ...errorFields(error) });
+      }
+      // Not cached, so the next run tries it again. This run leaves it be.
+      if (verdict === undefined) {
+        skipping.playlists.add(playlist.id);
+        continue;
+      }
       verdicts.set(playlist.id, verdict);
       pending.push(verdict);
-      read += 1;
       if (pending.length >= 10) await flush();
     }
   } finally {

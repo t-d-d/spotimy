@@ -1,7 +1,7 @@
 // The function behind API Gateway: the page's API and Spotify sign-in.
 import { serve } from "./api";
 import { incoming, result, type Result } from "./http";
-import { createLogger, errorClass } from "./log";
+import { createLogger, errorFields } from "./log";
 import { isRoute } from "./routes";
 import { ready } from "./services";
 
@@ -36,7 +36,7 @@ export async function handler(event: unknown): Promise<Result> {
       ),
     );
   } catch (error) {
-    log.error("request-failed", { errorClass: errorClass(error) });
+    log.error("request-failed", errorFields(error));
     return result(unavailable());
   }
 }

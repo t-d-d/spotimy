@@ -2,7 +2,7 @@
 // person asks (hosting.md).
 import { z } from "zod";
 import { jobSchema, newRunId } from "./jobs";
-import { createLogger, errorClass } from "./log";
+import { createLogger, errorFields } from "./log";
 import { ready } from "./services";
 import { runGroup, type Job } from "./sync/run";
 
@@ -27,6 +27,7 @@ export function jobOf(event: unknown): Job | undefined {
       hop: 0,
       approved: null,
       carried: null,
+      skipped: null,
     };
   }
   const parsed = jobSchema.safeParse(event);
@@ -53,13 +54,18 @@ export async function handler(
       remainingMs: () => context.getRemainingTimeInMillis(),
     });
     if (result.state === "continue") {
-      await startJob({ ...job, hop: job.hop + 1, carried: result.carried });
+      await startJob({
+        ...job,
+        hop: job.hop + 1,
+        carried: result.carried,
+        skipped: result.skipped,
+      });
     }
   } catch (error) {
     // runGroup has logged it and freed the lock. Async invokes are not
     // retried (serverless.yml), so nothing runs twice.
     log.error("request-failed", {
-      errorClass: errorClass(error),
+      ...errorFields(error),
       runId: job.runId,
     });
   }

@@ -115,7 +115,7 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
           Math.ceil(Number(response.headers.get("retry-after") ?? "5") || 5),
         );
         if (waited + retryAfter + 1 > maxWaitSeconds) {
-          log.warn("spotify-rate-limited", { retryAfter });
+          log.warn("spotify-rate-limited", { status: 429, retryAfter });
           throw new RateLimited(retryAfter);
         }
         log.info("spotify-retried", { status: 429, retryAfter });
