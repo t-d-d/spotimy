@@ -1,0 +1,130 @@
+.title {
+  font-size: var(--size-title);
+  line-height: var(--leading-title);
+  font-weight: var(--weight-strong);
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  margin-top: var(--space-12);
+  color: var(--text-2);
+}
+
+.card {
+  margin-top: var(--space-16);
+  padding: var(--space-16);
+  background: var(--surface);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.section {
+  font-size: var(--size-section);
+  font-weight: var(--weight-strong);
+}
+
+.meta {
+  color: var(--text-3);
+  font-size: var(--size-meta);
+}
+
+.note {
+  margin-top: var(--space-12);
+  padding: var(--space-12);
+  background: var(--warn-tint);
+  border-radius: var(--radius-button);
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin-top: var(--space-16);
+}
+
+.primary,
+.secondary,
+.danger {
+  min-height: var(--tap);
+  padding: 0 var(--space-16);
+  border-radius: var(--radius-button);
+  border: var(--hairline) solid var(--accent);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.secondary {
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.danger {
+  background: var(--surface);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.primary:disabled,
+.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-8);
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin-top: var(--space-8);
+}
+
+.list li {
+  padding: var(--space-8) 0;
+  border-top: var(--hairline) solid var(--line);
+}
+
+.pill {
+  display: inline-block;
+  margin-left: var(--space-8);
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-pill);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: var(--size-meta);
+}
+
+.summary {
+  cursor: pointer;
+  font-weight: var(--weight-strong);
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+}
+
+.setting {
+  display: flex;
+  gap: var(--space-12);
+  align-items: flex-start;
+  padding: var(--space-8) 0;
+  min-height: var(--tap);
+}
+
+.setting input {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  accent-color: var(--accent);
+}

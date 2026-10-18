@@ -1,0 +1,8 @@
+# Every action is pinned to a commit, so nothing moves on its own. Dependabot
+# proposes each new release as a pull request, which the gate checks (#326).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

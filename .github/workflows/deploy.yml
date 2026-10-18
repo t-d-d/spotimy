@@ -1,0 +1,359 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    uses: ./.github/workflows/gate.yml
+
+  deploy:
+    needs: gate
+    runs-on: ubuntu-24.04
+    # No GitHub environment: the role trusts only the subject for main, and a
+    # job that names an environment is given a different one.
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.page.outputs.url }}
+      stack: ${{ steps.stack.outputs.stack }}
+    # The rollback repeats these steps, ids and all, and names the one that
+    # failed by its id.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: node
+        with:
+          node-version-file: .node-version
+          cache: npm
+      # .npmrc skips install scripts, but the serverless package's installs the
+      # launcher, so this install runs them. The flag on the command line wins
+      # over .npmrc.
+      - run: npm ci --ignore-scripts=false
+        id: install
+      # The serverless package only installs a launcher, which fetches the
+      # framework and runs it. Serverless publishes no checksum for either, so
+      # both must match sums of downloads made when the version was pinned. A
+      # new launcher build fails here until someone checks it and commits its
+      # sum. The framework is unpacked, and the list of releases written,
+      # where the launcher looks, so it fetches nothing. Then the host is
+      # blocked, so nothing unchecked can come from it.
+      - name: Check the Serverless launcher and framework
+        id: serverless
+        run: |
+          version=4.43.0
+          archive="$RUNNER_TEMP/serverless-$version.tgz"
+          curl --fail --silent --show-error --output "$archive" \
+            "https://install.serverless.com/archives/serverless-$version.tgz"
+          sha256sum --check --strict <<EOF
+          b2de18a44fef8c320b7c0059aa68c8a8fb30b1a975a17ac4b528539f9366858f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
+          87eef92a242b92c44b6ac02fcc3176553c774f1340c536176a0a9d373771eb5b  $archive
+          EOF
+          release="$HOME/.serverless/releases/$version"
+          mkdir -p "$release" ~/.serverless/binaries
+          tar -xzf "$archive" -C "$release"
+          echo "{\"supportedVersions\":[\"$version\"],\"blockedVersions\":[]}" \
+            > ~/.serverless/binaries/versions.json
+          echo "{\"version\":\"$version\",\"updateLastChecked\":\"$(date -u +%FT%TZ)\"}" \
+            > ~/.serverless/binaries/metadata.json
+          echo "0.0.0.0 install.serverless.com" | sudo tee -a /etc/hosts > /dev/null
+      # Build before the job holds any AWS credentials.
+      - name: Build the page
+        id: build
+        run: npm run build
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        id: credentials
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Apply the deploy role's stack
+        id: role-stack
+        run: >-
+          aws cloudformation deploy
+          --stack-name spotimy
+          --template-file infra/github-oidc.cfn.yml
+          --capabilities CAPABILITY_NAMED_IAM
+          --no-fail-on-empty-changeset
+          --parameter-overrides
+          GitHubOwnerId=${{ github.repository_owner_id }}
+          GitHubRepoId=${{ github.repository_id }}
+      # From here a failure may have changed what is live, so it rolls back
+      # to live-ok. A failed job still passes on the outputs its steps set
+      # (repo-and-delivery.md).
+      - name: Record that the stack deploy has started
+        id: stack
+        run: echo "stack=started" >> "$GITHUB_OUTPUT"
+      - name: Deploy the stack
+        id: app-stack
+        run: node_modules/.bin/serverless deploy
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID }}
+      - name: Publish the page
+        id: page
+        run: |
+          output() {
+            aws cloudformation describe-stacks --stack-name spotimy-prod \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          bucket=$(output WebBucketName)
+          url=$(output WebUrl)
+          # The hashed files first, then the page that names them. The page is
+          # revalidated on every load, so a deploy shows at once.
+          aws s3 sync web/dist "s3://$bucket" --exclude index.html \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp web/dist/index.html "s3://$bucket/index.html" \
+            --cache-control "no-cache"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "The page is live at $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "Spotify's redirect URI for it is $url/api/callback" >> "$GITHUB_STEP_SUMMARY"
+
+  live:
+    needs: deploy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      # Only the deploy and rollback jobs run the Serverless launcher, and check
+      # it. Its download is the one install script on a Linux runner, so the
+      # other jobs skip it. The flag repeats .npmrc, which an older commit, such
+      # as live-ok, may not have.
+      - run: npm ci --ignore-scripts
+      - run: npm run test:live
+        env:
+          SPOTIMY_URL: ${{ needs.deploy.outputs.url }}
+
+  # live-ok names the last commit that passed its live check (repo-and-delivery.md).
+  mark-live-ok:
+    needs: live
+    # A re-run after a rollback checks the build the rollback put back, not
+    # this run's commit, so only the first attempt moves the tag.
+    if: ${{ success() && github.run_attempt == '1' }}
+    runs-on: ubuntu-24.04
+    # A tag left behind only means a rollback goes one build further back. It
+    # is no reason to fail a deploy that passed its live check.
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - name: Move live-ok to the deployed commit
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/live-ok" --silent; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/live-ok" \
+              -f sha="$GITHUB_SHA" -F force=true --silent
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref=refs/tags/live-ok -f sha="$GITHUB_SHA" --silent
+          fi
+          echo "live-ok now names $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Say the tag did not move
+        if: failure()
+        run: >-
+          echo "live-ok did not move to $GITHUB_SHA. A rollback would put
+          back an older build." >> "$GITHUB_STEP_SUMMARY"
+
+  # The live check failed, or the deploy failed once its stack deploy had
+  # started, so put back the last build that passed the live check. A failure
+  # before the stack deploy changed nothing live, and a cancelled run starts
+  # no rollback (repo-and-delivery.md). The run still ends failed, and the owner reverts
+  # the pull request.
+  find-live-ok:
+    needs: [deploy, live]
+    if: ${{ !cancelled() && (needs.live.result == 'failure' || (needs.deploy.result == 'failure' && needs.deploy.outputs.stack == 'started')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - name: Find the last build that passed its live check
+        id: tag
+        run: |
+          if [ "$LIVE_RESULT" = failure ]; then
+            cause="The live check failed."
+          else
+            cause="The deploy failed once its stack deploy had started."
+          fi
+          # mark-live-ok makes a lightweight tag, so it names the commit itself.
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/live-ok" \
+            --jq '.[] | select(.ref == "refs/tags/live-ok" and .object.type == "commit") | .object.sha')
+          if [ -z "$sha" ]; then
+            echo "$cause There is no live-ok tag naming a commit, so nothing is rolled back." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$cause Redeploying live-ok, commit $sha." \
+            >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIVE_RESULT: ${{ needs.live.result }}
+
+  # The deploy's steps, at live-ok, without the deploy role's own stack: an
+  # older template must not undo a change to the role.
+  rollback:
+    needs: find-live-ok
+    if: ${{ !cancelled() && needs.find-live-ok.outputs.sha != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      url: ${{ steps.page.outputs.url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          ref: ${{ needs.find-live-ok.outputs.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        id: node
+        with:
+          node-version-file: .node-version
+          cache: npm
+      # .npmrc skips install scripts, but the serverless package's installs the
+      # launcher, so this install runs them. The flag on the command line wins
+      # over .npmrc.
+      - run: npm ci --ignore-scripts=false
+        id: install
+      # The serverless package only installs a launcher, which fetches the
+      # framework and runs it. Serverless publishes no checksum for either, so
+      # both must match sums of downloads made when the version was pinned. A
+      # new launcher build fails here until someone checks it and commits its
+      # sum. The framework is unpacked, and the list of releases written,
+      # where the launcher looks, so it fetches nothing. Then the host is
+      # blocked, so nothing unchecked can come from it.
+      - name: Check the Serverless launcher and framework
+        id: serverless
+        run: |
+          version=4.43.0
+          archive="$RUNNER_TEMP/serverless-$version.tgz"
+          curl --fail --silent --show-error --output "$archive" \
+            "https://install.serverless.com/archives/serverless-$version.tgz"
+          sha256sum --check --strict <<EOF
+          b2de18a44fef8c320b7c0059aa68c8a8fb30b1a975a17ac4b528539f9366858f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
+          87eef92a242b92c44b6ac02fcc3176553c774f1340c536176a0a9d373771eb5b  $archive
+          EOF
+          release="$HOME/.serverless/releases/$version"
+          mkdir -p "$release" ~/.serverless/binaries
+          tar -xzf "$archive" -C "$release"
+          echo "{\"supportedVersions\":[\"$version\"],\"blockedVersions\":[]}" \
+            > ~/.serverless/binaries/versions.json
+          echo "{\"version\":\"$version\",\"updateLastChecked\":\"$(date -u +%FT%TZ)\"}" \
+            > ~/.serverless/binaries/metadata.json
+          echo "0.0.0.0 install.serverless.com" | sudo tee -a /etc/hosts > /dev/null
+      # Build before the job holds any AWS credentials.
+      - name: Build the page
+        id: build
+        run: npm run build
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        id: credentials
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      # CloudFormation takes no update while the stack is changing, or stuck
+      # in an undo that failed. This tries the undo once more, with this job's
+      # own session, and skips no resource: whether to skip one is the
+      # owner's call. A stack still stuck stops the rollback here (repo-and-delivery.md).
+      - name: Let the stack settle
+        id: settle
+        run: |
+          status() {
+            aws cloudformation describe-stacks --stack-name spotimy-prod \
+              --query "Stacks[0].StackStatus" --output text
+          }
+          stack=$(status)
+          while [[ "$stack" == *_IN_PROGRESS ]]; do
+            echo "spotimy-prod is $stack. Waiting for it to settle."
+            sleep 30
+            stack=$(status)
+          done
+          if [ "$stack" = UPDATE_ROLLBACK_FAILED ]; then
+            echo "spotimy-prod is UPDATE_ROLLBACK_FAILED. Continuing its rollback once."
+            if ! { aws cloudformation continue-update-rollback --stack-name spotimy-prod &&
+                aws cloudformation wait stack-rollback-complete --stack-name spotimy-prod; }; then
+              {
+                echo "spotimy-prod is still $(status) after its rollback was continued once, so nothing is rolled back. The stack needs the owner. CloudFormation's reason for each resource that failed:"
+                echo
+                aws cloudformation list-stack-resources --stack-name spotimy-prod \
+                  --query "StackResourceSummaries[?ends_with(ResourceStatus, '_FAILED')].[LogicalResourceId, ResourceStatusReason]" \
+                  --output text | sed 's/\t/: /; s/^/- /'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
+      - name: Deploy the stack
+        id: app-stack
+        run: node_modules/.bin/serverless deploy
+        env:
+          SERVERLESS_ACCESS_KEY: ${{ secrets.SERVERLESS_ACCESS_KEY }}
+          SPOTIFY_CLIENT_ID: ${{ vars.SPOTIFY_CLIENT_ID }}
+      - name: Publish the page
+        id: page
+        run: |
+          output() {
+            aws cloudformation describe-stacks --stack-name spotimy-prod \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          bucket=$(output WebBucketName)
+          url=$(output WebUrl)
+          # The hashed files first, then the page that names them. The page is
+          # revalidated on every load, so a deploy shows at once.
+          aws s3 sync web/dist "s3://$bucket" --exclude index.html \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp web/dist/index.html "s3://$bucket/index.html" \
+            --cache-control "no-cache"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "The page is live at $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "Spotify's redirect URI for it is $url/api/callback" >> "$GITHUB_STEP_SUMMARY"
+      # find-live-ok has said live-ok is going back, so a rollback that stops
+      # partway says so. The steps context holds only steps with an id, so
+      # every step above has one.
+      - name: Say the rollback did not finish
+        if: failure()
+        run: |
+          step=$(jq -r '[to_entries[] | select(.value.outcome == "failure") | .key] | join(", ")' <<< "$STEPS")
+          echo "The rollback did not finish: step ${step:-with no id} failed. What is live may not be live-ok." \
+            >> "$GITHUB_STEP_SUMMARY"
+        env:
+          STEPS: ${{ toJSON(steps) }}
+
+  # live-ok's own live tier, against what the rollback put back.
+  rollback-live:
+    needs: [find-live-ok, rollback]
+    # The live job failed upstream, so without a condition this never runs.
+    if: ${{ !cancelled() && needs.rollback.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.find-live-ok.outputs.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      # Only the deploy and rollback jobs run the Serverless launcher, and check
+      # it. Its download is the one install script on a Linux runner, so the
+      # other jobs skip it. The flag repeats .npmrc, which an older commit, such
+      # as live-ok, may not have.
+      - run: npm ci --ignore-scripts
+      - run: npm run test:live
+        env:
+          SPOTIMY_URL: ${{ needs.rollback.outputs.url }}

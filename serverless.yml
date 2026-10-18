@@ -1,0 +1,431 @@
+# The deploy role and its OIDC provider are a separate stack,
+# infra/github-oidc.cfn.yml, which the deploy job applies first.
+service: spotimy
+# One exact version, whose archive the deploy job checks against its sum.
+frameworkVersion: "4.43.0"
+
+provider:
+  name: aws
+  region: ${env:AWS_REGION}
+  stage: prod
+  runtime: nodejs22.x
+  timeout: 10
+  logRetentionInDays: 30
+  logs:
+    lambda:
+      # JSON lets each line carry the level its console method sets
+      # (logging.md).
+      logFormat: JSON
+      applicationLogLevel: INFO
+      systemLogLevel: INFO
+  environment:
+    TABLE_NAME: !Ref Table
+    # The page and the API share CloudFront's address (hosting.md), and the
+    # Spotify sign-in redirect is built from it (identity.md).
+    PUBLIC_URL: !Join ["", ["https://", !GetAtt WebDistribution.DomainName]]
+    # The app's id is public. There is no client secret (identity.md).
+    SPOTIFY_CLIENT_ID: ${env:SPOTIFY_CLIENT_ID}
+    # The functions read the key itself when they first need it.
+    SESSION_KEY_PARAMETER: /spotimy/session-key
+    WORKER_FUNCTION: ${self:service}-${sls:stage}-worker
+  iam:
+    role:
+      statements:
+        # No scan (table-design.md).
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:Query
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:BatchWriteItem
+            - dynamodb:ConditionCheckItem
+          Resource: !GetAtt Table.Arn
+        # Encrypted with AWS's own Parameter Store key, which any role allowed
+        # to read the parameter may decrypt.
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/spotimy/session-key"
+        # The API starts the worker, and the worker carries on in a fresh
+        # invocation of itself (hosting.md).
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${sls:stage}-worker"
+
+build:
+  esbuild:
+    # Lambda loads a .mjs bundle as an ES module.
+    format: esm
+    outExtension:
+      ".js": ".mjs"
+
+functions:
+  api:
+    handler: service/src/handler.handler
+    events:
+      - httpApi: "GET /api/login"
+      - httpApi: "GET /api/callback"
+      - httpApi: "POST /api/logout"
+      - httpApi: "GET /api/status"
+      - httpApi: "PUT /api/settings"
+      - httpApi: "POST /api/check"
+      - httpApi: "POST /api/apply"
+      - httpApi: "POST /api/leave"
+
+  # Off the request path: a first run reads every member's library and takes
+  # minutes (hosting.md).
+  worker:
+    handler: service/src/worker.handler
+    timeout: 900
+    memorySize: 512
+    # A run is never started twice by Lambda. One that fails is logged, and
+    # the next scheduled run plans again from what the libraries hold.
+    maximumRetryAttempts: 0
+    events:
+      # 05:30 UTC, early morning in London.
+      - schedule: cron(30 5 * * ? *)
+
+resources:
+  # Every route shares one allowance. A request over it gets API Gateway's
+  # own 429 and starts no function. This block takes the place of the
+  # framework's DefaultRouteSettings whole, so it repeats the one setting the
+  # framework writes there.
+  extensions:
+    HttpApiStage:
+      Properties:
+        DefaultRouteSettings:
+          DetailedMetricsEnabled: false
+          ThrottlingRateLimit: 20
+          ThrottlingBurstLimit: 40
+
+  Resources:
+    # No secondary index and no TTL (table-design.md). The table outlives the
+    # stack, since it holds everyone's tokens and memory of their libraries.
+    Table:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        BillingMode: PAY_PER_REQUEST
+        DeletionProtectionEnabled: true
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+
+    WebBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced
+
+    WebOriginAccessControl:
+      Type: AWS::CloudFront::OriginAccessControl
+      Properties:
+        OriginAccessControlConfig:
+          Name: spotimy-web
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+
+    WebDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          Comment: spotimy page
+          DefaultRootObject: index.html
+          HttpVersion: http2and3
+          IPV6Enabled: true
+          PriceClass: PriceClass_100
+          Origins:
+            - Id: web
+              DomainName: !GetAtt WebBucket.RegionalDomainName
+              OriginAccessControlId: !GetAtt WebOriginAccessControl.Id
+              S3OriginConfig:
+                OriginAccessIdentity: ""
+            # On the page's own address, so the session cookie is first party
+            # and the page needs no API address at build time.
+            - Id: api
+              DomainName: !Sub "${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols: [TLSv1.2]
+          DefaultCacheBehavior:
+            TargetOriginId: web
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            # AWS managed policy: CachingOptimized.
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+            ResponseHeadersPolicyId: !Ref WebResponseHeadersPolicy
+          CacheBehaviors:
+            # Each answer is one person's, so nothing is cached, and the
+            # cookies and query go on. AWS managed policies: CachingDisabled,
+            # AllViewerExceptHostHeader and SecurityHeadersPolicy.
+            - PathPattern: /api/*
+              TargetOriginId: api
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+              CachedMethods: [GET, HEAD]
+              Compress: true
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+
+    # The page loads nothing from anywhere else.
+    WebResponseHeadersPolicy:
+      Type: AWS::CloudFront::ResponseHeadersPolicy
+      Properties:
+        ResponseHeadersPolicyConfig:
+          Name: spotimy-page
+          Comment: The page's security headers and CSP
+          SecurityHeadersConfig:
+            StrictTransportSecurity:
+              AccessControlMaxAgeSec: 31536000
+              Override: true
+            ContentTypeOptions:
+              Override: true
+            FrameOptions:
+              FrameOption: DENY
+              Override: true
+            ReferrerPolicy:
+              ReferrerPolicy: strict-origin-when-cross-origin
+              Override: true
+            ContentSecurityPolicy:
+              Override: true
+              ContentSecurityPolicy: >-
+                default-src 'self';
+                img-src 'self' data:;
+                style-src 'self';
+                frame-ancestors 'none';
+                object-src 'none';
+                base-uri 'none';
+                form-action 'self'
+
+    WebBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref WebBucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: TheDistributionReadsThePage
+              Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Join ["", [!GetAtt WebBucket.Arn, "/*"]]
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Join
+                    - ""
+                    - - "arn:"
+                      - !Ref AWS::Partition
+                      - ":cloudfront::"
+                      - !Ref AWS::AccountId
+                      - ":distribution/"
+                      - !Ref WebDistribution
+
+    # AWS sends a confirmation link first, and nothing arrives until the
+    # owner clicks it.
+    AlertTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: spotimy-alerts
+        DisplayName: spotimy alerts
+
+    AlertEmail:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: email
+        TopicArn: !Ref AlertTopic
+        Endpoint: ${ssm:/spotimy/alerts/email}
+
+    # Every function needs one of these filters (alerting.md).
+    ApiErrorLines:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        LogGroupName: !Ref ApiLogGroup
+        FilterPattern: '{ $.level = "ERROR" }'
+        MetricTransformations:
+          - MetricNamespace: spotimy
+            MetricName: ErrorLines
+            MetricValue: "1"
+
+    WorkerErrorLines:
+      Type: AWS::Logs::MetricFilter
+      Properties:
+        LogGroupName: !Ref WorkerLogGroup
+        FilterPattern: '{ $.level = "ERROR" }'
+        MetricTransformations:
+          - MetricNamespace: spotimy
+            MetricName: ErrorLines
+            MetricValue: "1"
+
+    ErrorLinesAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: spotimy-error-lines
+        AlarmDescription: >-
+          A spotimy function wrote an error-level line. Run the saved query
+          spotimy/errors first.
+        Namespace: spotimy
+        MetricName: ErrorLines
+        Statistic: Sum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlertTopic
+
+    # Failures that write no line: a crash, a timeout, running out of memory
+    # and throttling.
+    FunctionFailuresAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: spotimy-function-failures
+        AlarmDescription: >-
+          A spotimy function failed, timed out or was throttled. Run the saved
+          query spotimy/function-failures first.
+        Metrics:
+          - Id: apiErrors
+            ReturnData: false
+            MetricStat:
+              Metric:
+                Namespace: AWS/Lambda
+                MetricName: Errors
+                Dimensions:
+                  - Name: FunctionName
+                    Value: !Ref ApiLambdaFunction
+              Period: 60
+              Stat: Sum
+          - Id: apiThrottles
+            ReturnData: false
+            MetricStat:
+              Metric:
+                Namespace: AWS/Lambda
+                MetricName: Throttles
+                Dimensions:
+                  - Name: FunctionName
+                    Value: !Ref ApiLambdaFunction
+              Period: 60
+              Stat: Sum
+          - Id: workerErrors
+            ReturnData: false
+            MetricStat:
+              Metric:
+                Namespace: AWS/Lambda
+                MetricName: Errors
+                Dimensions:
+                  - Name: FunctionName
+                    Value: !Ref WorkerLambdaFunction
+              Period: 60
+              Stat: Sum
+          - Id: workerThrottles
+            ReturnData: false
+            MetricStat:
+              Metric:
+                Namespace: AWS/Lambda
+                MetricName: Throttles
+                Dimensions:
+                  - Name: FunctionName
+                    Value: !Ref WorkerLambdaFunction
+              Period: 60
+              Stat: Sum
+          - Id: failures
+            Label: Failures
+            Expression: SUM(METRICS())
+            ReturnData: true
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - !Ref AlertTopic
+
+    # The account holds spotimy alone, so its bill is spotimy's. AWS
+    # publishes it about every six hours, and only in us-east-1.
+    SpendAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: spotimy-spend
+        AlarmDescription: >-
+          This month's AWS bill has passed the set amount. Open Cost Explorer.
+        Namespace: AWS/Billing
+        MetricName: EstimatedCharges
+        Dimensions:
+          - Name: Currency
+            Value: USD
+        Statistic: Maximum
+        Period: 21600
+        EvaluationPeriods: 1
+        Threshold: ${ssm:/spotimy/alerts/monthly-spend}
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: ignore
+        AlarmActions:
+          - !Ref AlertTopic
+
+    ErrorsQuery:
+      Type: AWS::Logs::QueryDefinition
+      Properties:
+        Name: spotimy/errors
+        LogGroupNames:
+          - !Ref ApiLogGroup
+          - !Ref WorkerLogGroup
+        QueryString: |
+          fields @timestamp, message.event, message.errorClass, message.status, message.runId, errorType, @logStream
+          | filter level = "ERROR"
+          | sort @timestamp desc
+          | limit 100
+
+    FunctionFailuresQuery:
+      Type: AWS::Logs::QueryDefinition
+      Properties:
+        Name: spotimy/function-failures
+        LogGroupNames:
+          - !Ref ApiLogGroup
+          - !Ref WorkerLogGroup
+        QueryString: |
+          fields @timestamp, type, record.status, record.errorType, record.requestId, @logStream
+          | filter ispresent(record.status) and record.status != "success"
+          | sort @timestamp desc
+          | limit 100
+
+    RunsQuery:
+      Type: AWS::Logs::QueryDefinition
+      Properties:
+        Name: spotimy/runs
+        LogGroupNames:
+          - !Ref WorkerLogGroup
+        QueryString: |
+          fields @timestamp, message.event, message.runId, message.job, message.userId, message.save, message.follow, message.create, message.failed
+          | filter message.event in ["run-started", "run-continued", "plan-made", "changes-applied", "run-paused", "run-finished", "run-failed"]
+          | sort @timestamp desc
+          | limit 200
+
+  Outputs:
+    WebBucketName:
+      Value: !Ref WebBucket
+    WebUrl:
+      Value: !Join ["", ["https://", !GetAtt WebDistribution.DomainName]]
