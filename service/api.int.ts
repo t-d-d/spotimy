@@ -296,6 +296,46 @@ describe("the page's API", () => {
     ]);
   });
 
+  it("tells the page how far a run has got, and how the last one ended", async () => {
+    const session = await signIn("thomas");
+    const { store } = ready();
+    const thomas = userIdSchema.parse("thomas");
+    const started = new Date();
+    await store.takeRun(
+      {
+        runId: "shown0000001",
+        job: "check",
+        requestedBy: thomas,
+        state: "running",
+        startedAt: started.toISOString(),
+        retryAt: null,
+        expiresAt: Math.floor(started.getTime() / 1000) + 600,
+        progress: null,
+      },
+      started,
+    );
+    const progress = { stage: "identifying", done: 240, total: 1130 } as const;
+    await store.setProgress("shown0000001", progress);
+    expect((await status(session)).run).toMatchObject({
+      state: "running",
+      progress,
+    });
+
+    const outcome = {
+      runId: "shown0000001",
+      job: "check",
+      requestedBy: thomas,
+      finishedAt: new Date().toISOString(),
+      result: "failed",
+      retryAt: null,
+    } as const;
+    await store.putOutcome(outcome);
+    await store.endRun("shown0000001");
+    const now = await status(session);
+    expect(now.run).toMatchObject({ state: "idle", progress: null });
+    expect(now.outcome).toEqual(outcome);
+  });
+
   it("signs out by clearing the cookie", async () => {
     const session = await signIn("thomas");
     const answer = await call("POST", "/api/logout", { cookies: [session] });

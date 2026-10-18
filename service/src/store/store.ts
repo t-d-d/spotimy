@@ -95,6 +95,8 @@ export interface Store {
   setProgress: (runId: string, progress: Progress) => Promise<void>;
   endRun: (runId: string) => Promise<void>;
   getOutcome: () => Promise<Outcome | undefined>;
+  // Only while the run holds the lock, so one that lapsed cannot overwrite
+  // a newer run's ending.
   putOutcome: (outcome: Outcome) => Promise<void>;
   // Deletes everything the person's key holds, their membership, and what
   // was found about the playlists they own.
@@ -371,7 +373,32 @@ export function createStore(config: {
 
     getOutcome: () => get(keys.outcome(), outcomeSchema),
 
-    putOutcome: (outcome) => put(keys.outcome(), outcome),
+    putOutcome: async (outcome) => {
+      try {
+        await db.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName,
+                  Key: keys.run(),
+                  ConditionExpression: "runId = :runId",
+                  ExpressionAttributeValues: { ":runId": outcome.runId },
+                },
+              },
+              { Put: { TableName, Item: { ...outcome, ...keys.outcome() } } },
+            ],
+          }),
+        );
+      } catch (error) {
+        if (!(
+          error instanceof TransactionCanceledException &&
+          error.CancellationReasons?.[0]?.Code === "ConditionalCheckFailed"
+        )) {
+          throw error;
+        }
+      }
+    },
 
     endRun: async (runId) => {
       try {

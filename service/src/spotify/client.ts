@@ -144,18 +144,15 @@ export function createSpotifyClient(options: ClientOptions): SpotifyClient {
       const schema = pageSchema(item);
       let next: string | null = path;
       while (next !== null) {
-        const page: {
-          items: { kept: T[]; skipped: number };
-          next: string | null;
-        } = await requiredBody(
-          await call("GET", next),
-          schema,
-          "a page from Spotify",
-        );
-        if (page.items.skipped > 0) {
-          log.warn("spotify-item-unreadable", { failed: page.items.skipped });
+        const page: { items: (T | null)[]; next: string | null } =
+          await requiredBody(
+            await call("GET", next),
+            schema,
+            "a page from Spotify",
+          );
+        for (const entry of page.items) {
+          if (entry !== null) yield entry;
         }
-        yield* page.items.kept;
         next = page.next;
       }
     },

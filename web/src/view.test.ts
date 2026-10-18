@@ -34,11 +34,13 @@ const base: Status = {
 
 const outcome = (
   result: NonNullable<Status["outcome"]>["result"],
-  finishedAt = "2026-10-18T13:00:00Z",
+  job: NonNullable<Status["outcome"]>["job"] = "check",
+  requestedBy: string | null = "matt",
 ): Status["outcome"] => ({
   runId: "run00000002",
-  job: "check",
-  finishedAt,
+  job,
+  requestedBy,
+  finishedAt: "2026-10-18T13:00:00Z",
   result,
   retryAt: null,
 });
@@ -194,12 +196,19 @@ describe("what the page says", () => {
     expect(outcomeLine({ ...base, outcome: outcome("failed") }, now)).toMatch(
       /^The last check stopped with an error today at \d\d:\d\d\. Press Check now to try again\.$/u,
     );
-    expect(outcomeLine({ ...base, outcome: outcome("stopped") }, now)).toMatch(
-      /^The last check ran too long and stopped/u,
+    expect(outcomeLine({ ...base, outcome: outcome("stopped") }, now)).toBe(
+      "The last check stopped before it finished. What it found is kept, so press Check now to carry on.",
     );
-    expect(outcomeLine({ ...base, outcome: outcome("paused") }, now)).toMatch(
-      /^Spotify asked spotimy to wait, so the last check stopped early/u,
+    expect(outcomeLine({ ...base, outcome: outcome("paused") }, now)).toBe(
+      "Spotify asked spotimy to wait, so the last check stopped early. What it found is kept, so press Check now to carry on.",
     );
+    // A check is everyone's, whoever pressed it, and so is the schedule's.
+    expect(
+      outcomeLine(
+        { ...base, outcome: outcome("failed", "schedule", null) },
+        now,
+      ),
+    ).toMatch(/^The last check stopped with an error/u);
     // A plan made after the failure means a later run worked.
     expect(
       outcomeLine(
@@ -219,6 +228,29 @@ describe("what the page says", () => {
           run: { ...base.run, state: "running", job: "check" },
           outcome: outcome("failed"),
         },
+        now,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("tells only the person who pressed Apply how their apply ended", () => {
+    const theirs = (result: NonNullable<Status["outcome"]>["result"]) =>
+      outcomeLine(
+        { ...base, outcome: outcome(result, "apply", "thomas") },
+        now,
+      );
+    expect(theirs("failed")).toMatch(
+      /^Your last apply stopped with an error today at \d\d:\d\d\. What it did is kept, so press Apply these changes to try again\.$/u,
+    );
+    expect(theirs("stopped")).toBe(
+      "Your last apply stopped before it finished. What it did is kept, so press Apply these changes to carry on.",
+    );
+    expect(theirs("paused")).toBe(
+      "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply these changes to carry on.",
+    );
+    expect(
+      outcomeLine(
+        { ...base, outcome: outcome("failed", "apply", "matt") },
         now,
       ),
     ).toBeUndefined();

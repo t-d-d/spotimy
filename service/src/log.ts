@@ -29,9 +29,10 @@ export const events = [
   "token-refresh-failed",
   "spotify-retried",
   "spotify-rate-limited",
-  // An item in a page from Spotify did not fit its schema and was skipped.
-  "spotify-item-unreadable",
   "followed-tracks-unreadable",
+  // How far a run has got, or how it ended, could not be saved for the page.
+  "progress-unwritten",
+  "outcome-unwritten",
 ] as const;
 
 export type Event = (typeof events)[number];

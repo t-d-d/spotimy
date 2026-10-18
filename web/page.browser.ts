@@ -288,6 +288,7 @@ describe("signed in", () => {
                   outcome: {
                     runId: "run00000002",
                     job: "check",
+                    requestedBy: "thomas",
                     finishedAt: new Date().toISOString(),
                     result: "failed",
                     retryAt: null,
@@ -297,9 +298,14 @@ describe("signed in", () => {
         },
       }),
     );
-    await page.getByText("Looking at playlists: 240 of 1,130.").waitFor();
+    // The wording is the unit tier's. This checks each line reaches the page.
     await page
-      .getByText(/^The last check stopped with an error today at/u)
+      .getByRole("status")
+      .getByText(/240 of 1,130/u)
+      .waitFor();
+    await page
+      .getByRole("status")
+      .getByText(/stopped with an error/u)
       .waitFor({ timeout: 10_000 });
   });
 });

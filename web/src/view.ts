@@ -46,19 +46,30 @@ export function progressLine(status: Status): string | undefined {
 }
 
 // Why the last run ended early, until a newer plan shows a later run worked.
+// A check is everyone's. An apply is only the person's who pressed Apply.
 export function outcomeLine(status: Status, now: Date): string | undefined {
-  const { outcome, last, run } = status;
+  const { outcome, last, run, user } = status;
   if (outcome === null || run.state !== "idle") return undefined;
   if (outcome.result === "finished") return undefined;
   if (last !== null && last.madeAt > outcome.finishedAt) return undefined;
-  const what = outcome.job === "apply" ? "apply" : "check";
+  if (outcome.job === "apply") {
+    if (outcome.requestedBy !== user.id) return undefined;
+    switch (outcome.result) {
+      case "failed":
+        return `Your last apply stopped with an error ${time(outcome.finishedAt, now)}. What it did is kept, so press Apply these changes to try again.`;
+      case "stopped":
+        return "Your last apply stopped before it finished. What it did is kept, so press Apply these changes to carry on.";
+      case "paused":
+        return "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply these changes to carry on.";
+    }
+  }
   switch (outcome.result) {
     case "failed":
-      return `The last ${what} stopped with an error ${time(outcome.finishedAt, now)}. Press Check now to try again.`;
+      return `The last check stopped with an error ${time(outcome.finishedAt, now)}. Press Check now to try again.`;
     case "stopped":
-      return `The last ${what} ran too long and stopped. What it found is kept, so press Check now to carry on.`;
+      return "The last check stopped before it finished. What it found is kept, so press Check now to carry on.";
     case "paused":
-      return `Spotify asked spotimy to wait, so the last ${what} stopped early. What it found is kept, so press Check now to carry on.`;
+      return "Spotify asked spotimy to wait, so the last check stopped early. What it found is kept, so press Check now to carry on.";
   }
 }
 

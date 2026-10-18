@@ -31,29 +31,30 @@ export const albumSchema = z.object({
 
 export type Album = z.infer<typeof albumSchema>;
 
-// A local file's track has an album with no id. It is dropped, not refused,
-// so one odd track does not stop a playlist being read.
-export const trackSchema = simpleTrackSchema.extend({
-  album: albumSchema.optional().catch(undefined),
-});
+// A local file's album has no id, and a local file is never part of an
+// album on Spotify, so its album is not read. Any other track's album must
+// fit.
+const withoutLocalAlbum = (value: unknown): unknown =>
+  typeof value === "object" &&
+  value !== null &&
+  "is_local" in value &&
+  value.is_local === true
+    ? { ...value, album: undefined }
+    : value;
+
+export const trackSchema = z.preprocess(
+  withoutLocalAlbum,
+  simpleTrackSchema.extend({ album: albumSchema.optional() }),
+);
 
 export type Track = z.infer<typeof trackSchema>;
 
-// A page's items may hold nulls, for content since removed. An item that
-// does not fit is dropped and counted, so one odd item does not stop a run.
-export function pageSchema<T>(item: z.ZodType<T>) {
+// A page's items may hold nulls, for content since removed. Any other item
+// that does not fit fails the page: a saved album left out would look
+// removed by the person.
+export function pageSchema<T extends z.ZodType>(item: T) {
   return z.object({
-    items: z.array(z.unknown()).transform((items) => {
-      const kept: T[] = [];
-      let skipped = 0;
-      for (const entry of items) {
-        if (entry === null) continue;
-        const parsed = item.safeParse(entry);
-        if (parsed.success) kept.push(parsed.data);
-        else skipped += 1;
-      }
-      return { kept, skipped };
-    }),
+    items: z.array(item.nullable()),
     next: z.string().nullable(),
   });
 }
