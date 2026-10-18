@@ -46,8 +46,12 @@ export type RunResult =
 
 export interface RunDeps {
   store: Store;
-  // undefined when the member has no tokens Spotify still takes.
-  clientFor: (member: Member) => Promise<SpotifyClient | undefined>;
+  // undefined when the member has no tokens Spotify still takes. onCall is
+  // told of every call the client sends.
+  clientFor: (
+    member: Member,
+    onCall: () => void,
+  ) => Promise<SpotifyClient | undefined>;
   log: Logger;
   now: () => Date;
   remainingMs: () => number;
@@ -61,6 +65,41 @@ export const reserveMs = 180_000;
 // Time kept back before each change an apply makes.
 export const stepReserveMs = 200_000;
 export const maxHops = 12;
+// spotimy's own allowance of Spotify calls a UTC day, for the whole group,
+// well under Spotify's own, so a check and an apply always have room. Looking
+// at playlists stops once the day's count reaches lookingCalls, and applying
+// once it reaches dailyCalls (spotify-api.md).
+export const dailyCalls = 1000;
+export const lookingCalls = 600;
+
+// The group's calls to Spotify today. Saved as the run goes and when each
+// invocation ends. A failed save is logged, never thrown.
+class CallCount {
+  private saved: number;
+  constructor(
+    private readonly store: Store,
+    private readonly day: string,
+    public used: number,
+    private readonly onUnsaved: (error: unknown) => void,
+  ) {
+    this.saved = used;
+  }
+
+  count(): void {
+    this.used += 1;
+  }
+
+  async save(): Promise<void> {
+    const unsaved = this.used - this.saved;
+    if (unsaved === 0) return;
+    try {
+      await this.store.addCallsUsed(this.day, unsaved);
+      this.saved = this.used;
+    } catch (error) {
+      this.onUnsaved(error);
+    }
+  }
+}
 
 class OutOfTime extends Error {
   override name = "OutOfTime";
@@ -125,11 +164,20 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     playlists: new Set(job.skipped?.playlists ?? []),
     searchRefusals: job.skipped?.searchRefusals ?? 0,
   };
+  const day = now().toISOString().slice(0, 10);
+  const calls = new CallCount(
+    store,
+    day,
+    await store.getCallsUsed(day),
+    (error) => {
+      log.warn("calls-unwritten", { ...fields, ...errorFields(error) });
+    },
+  );
   // Kept if this invocation dies without a word, or its next never comes,
   // so the page says the run stopped. Every ending below replaces it.
   await ended("stopped");
   try {
-    await work(job, deps, resumed, skipping);
+    await work(job, deps, { resumed, skipping, calls });
     await ended("finished");
     await store.endRun(job.runId);
     log.info("run-finished", fields);
@@ -156,6 +204,8 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     await store.endRun(job.runId);
     log.error("run-failed", { ...fields, ...errorFields(error) });
     throw error;
+  } finally {
+    await calls.save();
   }
 }
 
@@ -194,8 +244,11 @@ async function readLibrary(
 async function work(
   job: Job,
   deps: RunDeps,
-  resumed: Progress | null,
-  skipping: Skipping,
+  {
+    resumed,
+    skipping,
+    calls,
+  }: { resumed: Progress | null; skipping: Skipping; calls: CallCount },
 ): Promise<void> {
   const { store, log, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind };
@@ -224,7 +277,9 @@ async function work(
   const readers: Reader[] = [];
   for (const [index, member] of members.entries()) {
     if (job.hop === 0) await progress("reading", index, members.length);
-    const client = await deps.clientFor(member);
+    const client = await deps.clientFor(member, () => {
+      calls.count();
+    });
     if (client === undefined) continue;
     const library = await readLibrary(member, client);
     readers.push({ member, client, library });
@@ -247,6 +302,7 @@ async function work(
   const pending: Verdict[] = [];
   const flush = async () => {
     await store.putVerdicts(pending.splice(0));
+    await calls.save();
   };
   const owners = new Map<string, Reader>(
     readers.map((reader) => [reader.member.id, reader]),
@@ -278,10 +334,21 @@ async function work(
   // what earlier ones found.
   const known = seen.size - toRead.length;
   let read = 0;
+  // What the day's allowance left unread. The daily schedule carries on.
+  let unread = new Set<string>();
   try {
-    for (const { reader, playlist } of toRead) {
+    for (const [index, { reader, playlist }] of toRead.entries()) {
       if (read % 10 === 0) {
         await progress("identifying", known + read, seen.size);
+      }
+      if (calls.used >= lookingCalls) {
+        unread = new Set(toRead.slice(index).map((each) => each.playlist.id));
+        log.info("allowance-reached", {
+          ...fields,
+          read,
+          playlists: unread.size,
+        });
+        break;
       }
       if (remainingMs() < reserveMs) throw new OutOfTime(job.carried);
       const owner = owners.get(playlist.owner.id);
@@ -347,7 +414,11 @@ async function work(
     write: (done, total) => progress("applying", done, total),
   };
   for (const reader of readers) {
-    await planFor(reader, group, verdicts, job, deps, changes);
+    await planFor(reader, group, verdicts, job, deps, {
+      changes,
+      calls,
+      unread,
+    });
   }
 }
 
@@ -362,7 +433,11 @@ async function planFor(
   verdicts: Map<string, Verdict>,
   job: Job,
   deps: RunDeps,
-  changes: Counter,
+  {
+    changes,
+    calls,
+    unread,
+  }: { changes: Counter; calls: CallCount; unread: Set<string> },
 ): Promise<void> {
   const { store, log, now, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind, userId: member.id };
@@ -375,6 +450,8 @@ async function planFor(
     verdicts,
     group,
     memory: await store.getMemory(member.id),
+    unseen: library.playlists.filter((playlist) => unread.has(playlist.id))
+      .length,
   });
   const { plan, memory } = planned;
   log.info("plan-made", {
@@ -504,9 +581,14 @@ async function planFor(
     actions,
     privatePlaylists: profile.settings.privatePlaylists,
     hasTime: () => remainingMs() > stepReserveMs,
+    hasCalls: () => calls.used < dailyCalls,
     record,
     log,
   });
+  await calls.save();
+  if (outcome.stopped?.reason === "allowance") {
+    log.info("allowance-reached", { ...fields, failed: outcome.failed });
+  }
   const carried: Carried = {
     saved: (job.carried?.saved ?? 0) + outcome.saved,
     followed: (job.carried?.followed ?? 0) + outcome.followed,

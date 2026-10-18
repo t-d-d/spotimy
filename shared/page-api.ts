@@ -71,6 +71,10 @@ export const planSchema = z.object({
   ),
   // What the person removed, which no run puts back.
   ignored: z.object({ albums: count, playlists: count }),
+  // The person's playlists spotimy has still to look at, within its daily
+  // allowance of Spotify calls. Until none are left, the plan makes and
+  // follows no playlists.
+  waiting: count.default(0),
 });
 
 export type Plan = z.infer<typeof planSchema>;
@@ -82,7 +86,8 @@ export const appliedSchema = z.object({
   created: z.array(z.object({ name: z.string(), year: z.string() })),
   finished: count,
   failed: count,
-  // Spotify asked spotimy to stop before it was done.
+  // It stopped before it was done: Spotify asked it to, or the day's
+  // allowance of calls ran out.
   unfinished: z.boolean(),
 });
 

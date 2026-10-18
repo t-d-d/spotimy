@@ -4,6 +4,7 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { userIdSchema, type UserId } from "./src/ids";
 import type { Outcome } from "../shared/page-api";
 import type { RunState } from "./src/store/store";
+import { dailyCalls, lookingCalls } from "./src/sync/run";
 import type { Job } from "./src/worker";
 import { ready } from "./src/services";
 import { handler } from "./src/worker";
@@ -716,6 +717,81 @@ describe("refusals about one playlist", () => {
       (await lastRun(thomas)).plan.save.map((entry) => entry.albumId),
     ).toContain("Bully");
     expect((await ready().store.getVerdicts()).has("TIceage")).toBe(false);
+  });
+});
+
+describe("the day's allowance of Spotify calls", () => {
+  const today = () => new Date().toISOString().slice(0, 10);
+
+  it("counts every call to Spotify for the whole group, by the day", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    expect(await store.getCallsUsed(today())).toBe(spotify.calls.length);
+    expect(await store.getCallsUsed("2001-01-01")).toBe(0);
+  });
+
+  it("stops looking at playlists once the day's share for looking is used, and plans from what it knows", async () => {
+    await setUp();
+    await ready().store.addCallsUsed(today(), lookingCalls);
+    await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    const forThomas = (await lastRun(thomas)).plan;
+    expect(forThomas.waiting).toBeGreaterThan(0);
+    expect(forThomas.create).toEqual([]);
+    expect(forThomas.follow).toEqual([]);
+    expect(
+      spotify.calls.filter((call) =>
+        /^\/playlists\/[^/]+\/items/u.test(call.path),
+      ),
+    ).toEqual([]);
+  });
+
+  it("carries on looking the next day", async () => {
+    await setUp();
+    await ready().store.addCallsUsed(today(), lookingCalls);
+    await check();
+    expect((await lastRun(thomas)).plan.waiting).toBeGreaterThan(0);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    vi.setSystemTime(Date.now() + 24 * 3_600_000);
+    await check();
+    const forThomas = (await lastRun(thomas)).plan;
+    expect(forThomas.waiting).toBe(0);
+    expect(forThomas.create.map((entry) => entry.albumId)).toEqual(["Kath"]);
+    expect(forThomas.follow.map((entry) => entry.playlistId)).toEqual([
+      "MSmile",
+    ]);
+  });
+
+  it("stops an apply cleanly at the day's allowance, keeping what it did and leaving the rest in the plan", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    // Leaves room for reading the libraries again and one change more.
+    const reading = spotify.calls.filter(
+      (call) =>
+        call.path.startsWith("/me/playlists") ||
+        call.path.startsWith("/me/albums"),
+    ).length;
+    await store.addCallsUsed(
+      today(),
+      dailyCalls - (await store.getCallsUsed(today())) - reading - 1,
+    );
+    await apply(thomas);
+    expect(await store.getOutcome()).toMatchObject({ result: "finished" });
+    expect(spotify.library("thomas").saved).toContain("Bully");
+    expect(namesIn("thomas")).not.toContain(
+      "Kathryn Joseph – for you who are the wronged",
+    );
+    const after = await lastRun(thomas);
+    expect(after.applied).toMatchObject({ saved: 4, unfinished: true });
+    expect(after.plan.create.map((entry) => entry.albumId)).toEqual(["Kath"]);
   });
 });
 

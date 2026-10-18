@@ -50,7 +50,7 @@ export async function handler(
       store,
       log,
       now,
-      clientFor: (member) => clientFor(member, log),
+      clientFor: (member, onCall) => clientFor(member, log, onCall),
       remainingMs: () => context.getRemainingTimeInMillis(),
     });
     if (result.state === "continue") {

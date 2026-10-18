@@ -70,6 +70,8 @@ export interface PlanInput {
   verdicts: ReadonlyMap<string, Verdict>;
   group: GroupPlaylist[];
   memory: Memory | undefined;
+  // How many of the person's playlists spotimy has not looked at yet.
+  unseen: number;
 }
 
 export interface Actions {
@@ -206,8 +208,12 @@ export function makePlan(input: PlanInput): Planned {
       albums: memory.ignoredAlbumKeys.length,
       playlists: memory.ignoredPlaylists.length,
     },
+    waiting: input.unseen,
   };
   const actions: Actions = { save: [], follow: [], create: [], finish: [] };
+  // A playlist not looked at yet may already be this album's, so nothing is
+  // made or followed until every one has been seen (sync-safety.md).
+  const seenAll = input.unseen === 0;
   const queued = new Set<string>();
 
   const save = (
@@ -243,7 +249,7 @@ export function makePlan(input: PlanInput): Planned {
 
   // 2. The group's album playlists this library has none of, unless the
   //    person removed the album or a playlist of it.
-  if (settings.followGroup) {
+  if (settings.followGroup && seenAll) {
     for (const shared of group) {
       const key = albumKey(shared.albumLabel);
       if (shared.ownerId === library.userId) continue;
@@ -273,7 +279,7 @@ export function makePlan(input: PlanInput): Planned {
   const byAge = [...library.saved].sort((a, b) =>
     a.added_at.localeCompare(b.added_at),
   );
-  for (const saved of byAge) {
+  for (const saved of seenAll ? byAge : []) {
     const { album } = saved;
     const key = albumKey(label(album));
     if (isCovered(album.id, key)) continue;

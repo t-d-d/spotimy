@@ -82,6 +82,7 @@ function plan(options: {
   group?: GroupPlaylist[];
   settings?: Partial<Settings>;
   memory?: Memory | undefined;
+  unseen?: number;
 }) {
   const library: Library = {
     userId: thomas,
@@ -96,6 +97,7 @@ function plan(options: {
     ),
     group: options.group ?? [],
     memory: "memory" in options ? options.memory : memory(),
+    unseen: options.unseen ?? 0,
   });
 }
 
@@ -354,6 +356,32 @@ describe("following the group's album playlists", () => {
     expect(made.follow.map((entry) => entry.playlistId)).toEqual(["M1"]);
     expect(made.create).toEqual([]);
     expect(made.save).toEqual([]);
+  });
+});
+
+describe("while some playlists are still to look at", () => {
+  const library = {
+    playlists: [playlist("P1", "Bully – Lucky For You")],
+    verdicts: [verdict("P1", "A1", "Bully – Lucky For You")],
+    saved: [saved("K1", "Kathryn Joseph", "Bones", "2026-01-01T00:00:00Z")],
+    group: [shared("M1", "B1", "Cable Ties – All Her Plans")],
+  };
+
+  it("saves albums, but holds back new and followed playlists until it has seen them all", () => {
+    const { plan: made, actions } = plan({ ...library, unseen: 3 });
+    expect(made.save.map((entry) => entry.albumId)).toEqual(["A1"]);
+    expect(made.create).toEqual([]);
+    expect(made.follow).toEqual([]);
+    expect(actions.create).toEqual([]);
+    expect(actions.follow).toEqual([]);
+    expect(made.waiting).toBe(3);
+  });
+
+  it("makes and follows them once nothing is left to look at", () => {
+    const { plan: made } = plan(library);
+    expect(made.create.map((entry) => entry.albumId)).toEqual(["K1"]);
+    expect(made.follow.map((entry) => entry.playlistId)).toEqual(["M1"]);
+    expect(made.waiting).toBe(0);
   });
 });
 

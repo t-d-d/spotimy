@@ -35,6 +35,10 @@ export const events = [
   // Spotify refused a search by name. After a 403, or three in a row, the
   // run stops searching.
   "name-search-refused",
+  // The day's allowance of Spotify calls ran out, for looking or applying.
+  "allowance-reached",
+  // The day's count of Spotify calls could not be saved.
+  "calls-unwritten",
   // How far a run has got, or how it ended, could not be saved for the page.
   "progress-unwritten",
   "outcome-unwritten",
