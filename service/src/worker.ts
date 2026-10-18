@@ -27,6 +27,7 @@ export function jobOf(event: unknown): Job | undefined {
       hop: 0,
       approved: null,
       carried: null,
+      skipped: null,
     };
   }
   const parsed = jobSchema.safeParse(event);
@@ -53,7 +54,12 @@ export async function handler(
       remainingMs: () => context.getRemainingTimeInMillis(),
     });
     if (result.state === "continue") {
-      await startJob({ ...job, hop: job.hop + 1, carried: result.carried });
+      await startJob({
+        ...job,
+        hop: job.hop + 1,
+        carried: result.carried,
+        skipped: result.skipped,
+      });
     }
   } catch (error) {
     // runGroup has logged it and freed the lock. Async invokes are not

@@ -117,6 +117,7 @@ const job = (overrides: Partial<Job>): Job => ({
   hop: 0,
   approved: null,
   carried: null,
+  skipped: null,
   ...overrides,
 });
 
@@ -649,6 +650,30 @@ describe("refusals about one playlist", () => {
       403,
     );
     await check();
+    expect(await ready().store.getOutcome()).toMatchObject({
+      result: "finished",
+    });
+    expect(searches()).toHaveLength(1);
+  });
+
+  it("keeps what it skipped for the whole run, across invocations", async () => {
+    await setUp();
+    spotify.addPlaylist("rich", {
+      id: "RKath",
+      name: "Kathryn Joseph – for you who are the wronged",
+      tracks: tracks("Kath", 8),
+      images: [{ url: coverUrl("Kath") }],
+    });
+    spotify.follow("thomas", "RKath");
+    spotify.failMatching(
+      (method, path) => method === "GET" && path === "/search",
+      403,
+    );
+    // Time runs short straight after the refused search.
+    await check(() => (searches().length > 0 ? 1000 : 600_000));
+    const next = lambda.invoked[0];
+    if (next === undefined) throw new Error("The run did not carry on.");
+    await handler(next, context());
     expect(await ready().store.getOutcome()).toMatchObject({
       result: "finished",
     });

@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { jobs } from "../../shared/page-api";
 import { awsClientConfig } from "./aws";
-import { runIdSchema, userIdSchema } from "./ids";
+import { runIdSchema, spotifyIdSchema, userIdSchema } from "./ids";
 import type { Job } from "./sync/run";
 
 const count = z.number().int().nonnegative();
@@ -26,6 +26,13 @@ export const jobSchema = z.object({
       failed: count,
     })
     .nullable(),
+  // What earlier invocations of this run left alone, so it is left alone
+  // until the run ends: playlists Spotify refused or that could not be
+  // found, and refused searches in a row (sync/analyse.ts).
+  skipped: z
+    .object({ playlists: z.array(spotifyIdSchema), searchRefusals: count })
+    .nullable()
+    .default(null),
 });
 
 export const newRunId = (): string => randomBytes(12).toString("base64url");

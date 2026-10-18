@@ -25,8 +25,22 @@ describe("the worker's events", () => {
       hop: 2,
       approved: "shownrun0001",
       carried: { saved: 3, followed: 1, created: [], finished: 0, failed: 0 },
+      skipped: { playlists: ["RCaro"], searchRefusals: 3 },
     };
     expect(jobOf(job)).toEqual(job);
+  });
+
+  it("carries on a job from before runs kept what they skipped", () => {
+    expect(
+      jobOf({
+        kind: "check",
+        requestedBy: "thomas",
+        runId: "abcdefgh1234",
+        hop: 1,
+        approved: null,
+        carried: null,
+      }),
+    ).toMatchObject({ skipped: null });
   });
 
   it("refuses anything else", () => {

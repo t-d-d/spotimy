@@ -35,10 +35,11 @@ import { isWholeAlbum, type Verdict } from "./verdict";
 
 export type Job = z.infer<typeof jobSchema>;
 type Carried = NonNullable<Job["carried"]>;
+type Skipped = NonNullable<Job["skipped"]>;
 
 export type RunResult =
   | { state: "finished" }
-  | { state: "continue"; carried: Carried | null }
+  | { state: "continue"; carried: Carried | null; skipped: Skipped }
   | { state: "paused"; retryAt: Date }
   | { state: "busy" }
   | { state: "stopped" };
@@ -119,11 +120,16 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
     return { state: "busy" };
   }
   log.info(job.hop === 0 ? "run-started" : "run-continued", fields);
+  // Left alone until the run ends, so it is handed to the next invocation.
+  const skipping: Skipping = {
+    playlists: new Set(job.skipped?.playlists ?? []),
+    searchRefusals: job.skipped?.searchRefusals ?? 0,
+  };
   // Kept if this invocation dies without a word, or its next never comes,
   // so the page says the run stopped. Every ending below replaces it.
   await ended("stopped");
   try {
-    await work(job, deps, resumed);
+    await work(job, deps, resumed, skipping);
     await ended("finished");
     await store.endRun(job.runId);
     log.info("run-finished", fields);
@@ -137,13 +143,25 @@ export async function runGroup(job: Job, deps: RunDeps): Promise<RunResult> {
       return { state: "paused", retryAt };
     }
     if (error instanceof OutOfTime) {
-      return { state: "continue", carried: error.carried };
+      return {
+        state: "continue",
+        carried: error.carried,
+        skipped: {
+          playlists: [...skipping.playlists],
+          searchRefusals: skipping.searchRefusals,
+        },
+      };
     }
     await ended("failed");
     await store.endRun(job.runId);
     log.error("run-failed", { ...fields, ...errorFields(error) });
     throw error;
   }
+}
+
+interface Skipping {
+  playlists: Set<string>;
+  searchRefusals: number;
 }
 
 interface Reader {
@@ -177,6 +195,7 @@ async function work(
   job: Job,
   deps: RunDeps,
   resumed: Progress | null,
+  skipping: Skipping,
 ): Promise<void> {
   const { store, log, remainingMs } = deps;
   const fields = { runId: job.runId, job: job.kind };
@@ -232,10 +251,13 @@ async function work(
   const owners = new Map<string, Reader>(
     readers.map((reader) => [reader.member.id, reader]),
   );
-  const followedReader = createFollowedReader(() => {
-    log.info("followed-tracks-unreadable", fields);
+  const followedReader = createFollowedReader((status) => {
+    log.info("followed-tracks-unreadable", {
+      ...fields,
+      ...(status === undefined ? {} : { status }),
+    });
   });
-  const nameReader = createNameReader((status) => {
+  const nameReader = createNameReader(skipping, (status) => {
     log.warn("name-search-refused", { ...fields, status });
   });
   const seen = new Set<string>();
@@ -246,6 +268,7 @@ async function work(
       seen.add(playlist.id);
       if (verdicts.get(playlist.id)?.snapshot === playlist.snapshot_id)
         continue;
+      if (skipping.playlists.has(playlist.id)) continue;
       const owner = owners.get(playlist.owner.id);
       if (owner === undefined && memberIds.has(playlist.owner.id)) continue;
       toRead.push({ reader, playlist });
@@ -271,14 +294,22 @@ async function work(
               (await nameReader(reader.client, playlist)))
             : await analyseTracks(owner.client, playlist);
       } catch (error) {
-        // Spotify refused this playlist alone. It is not cached, so the
-        // next run tries it again.
-        if (!(error instanceof SpotifyError) || error.status >= 500) {
+        // Spotify refused this playlist alone. A 401 is the token's, not the
+        // playlist's, and a 5xx is Spotify's.
+        if (
+          !(error instanceof SpotifyError) ||
+          error.status === 401 ||
+          error.status >= 500
+        ) {
           throw error;
         }
         log.warn("playlist-unreadable", { ...fields, ...errorFields(error) });
       }
-      if (verdict === undefined) continue;
+      // Not cached, so the next run tries it again. This run leaves it be.
+      if (verdict === undefined) {
+        skipping.playlists.add(playlist.id);
+        continue;
+      }
       verdicts.set(playlist.id, verdict);
       pending.push(verdict);
       if (pending.length >= 10) await flush();

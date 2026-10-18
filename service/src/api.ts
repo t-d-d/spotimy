@@ -266,6 +266,7 @@ async function startRun(
       hop: 0,
       approved,
       carried: null,
+      skipped: null,
     });
   } catch (error) {
     await store.endRun(runId);
