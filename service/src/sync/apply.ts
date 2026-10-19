@@ -130,7 +130,8 @@ export async function applyActions(config: {
   hasTime: () => boolean;
   // Whether the day's allowance of Spotify calls has room for one more.
   hasCalls: () => boolean;
-  // Called once for everything one call to Spotify took.
+  // Called once a step's changes are in Spotify: once for a batch of saves
+  // and follows, and once for each playlist made or filled.
   record: (changes: Change[]) => Promise<void>;
   log: Logger;
 }): Promise<Outcome> {
