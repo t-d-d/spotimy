@@ -8,10 +8,8 @@ const thomas = userIdSchema.parse("thomas");
 
 const client = (): SpotifyClient => ({
   get: () => Promise.reject(new Error("not used")),
-  // eslint-disable-next-line require-yield
-  pages: async function* () {
-    await Promise.reject(new Error("not used"));
-  },
+  // Saving albums reads nothing.
+  pages: async function* () {},
   put: () => Promise.resolve(),
   post: () => Promise.reject(new Error("not used")),
 });
