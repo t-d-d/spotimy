@@ -12,7 +12,7 @@ const choices: { key: keyof Settings; label: string; hint?: string }[] = [
   {
     key: "autoApply",
     label: "Apply changes by myself each morning",
-    hint: "Starts once you have pressed Apply yourself.",
+    hint: "Starts once you have pressed Apply plan yourself.",
   },
   {
     key: "followGroup",

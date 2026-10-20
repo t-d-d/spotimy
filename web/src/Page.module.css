@@ -28,6 +28,13 @@
   font-size: var(--size-meta);
 }
 
+/* What the last run did, under what happens next. */
+.history {
+  margin-top: var(--space-8);
+  color: var(--text-3);
+  font-size: var(--size-meta);
+}
+
 .note {
   margin-top: var(--space-12);
   padding: var(--space-12);
@@ -69,12 +76,6 @@
   background: var(--surface);
   color: var(--danger);
   border-color: var(--danger);
-}
-
-.primary:disabled,
-.secondary:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .header {

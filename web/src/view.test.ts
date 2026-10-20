@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { LastRun, Status } from "../../shared/page-api";
+import type { LastRun, Plan, Status } from "../../shared/page-api";
 import {
   appliedLine,
   byYear,
   ignoredLine,
+  lastLine,
   outcomeLine,
   progressLine,
   waitingLine,
-  runLine,
   signInMessage,
+  standing,
 } from "./view";
 
 const now = new Date("2026-10-18T14:00:00Z");
@@ -77,39 +78,6 @@ const applied = (
 });
 
 describe("what the page says", () => {
-  it("says what a run is doing", () => {
-    expect(
-      runLine(
-        { ...base, run: { ...base.run, state: "running", job: "apply" } },
-        now,
-      ),
-    ).toBe("Applying your changes…");
-    expect(
-      runLine(
-        { ...base, run: { ...base.run, state: "running", job: "check" } },
-        now,
-      ),
-    ).toBe("Checking everyone's libraries…");
-    expect(runLine({ ...base, last: last(null) }, now)).toMatch(
-      /^Last checked today at/u,
-    );
-    expect(
-      runLine(
-        {
-          ...base,
-          run: {
-            ...base.run,
-            state: "paused",
-            retryAt: "2026-10-18T15:00:00Z",
-          },
-        },
-        now,
-      ),
-    ).toMatch(
-      /^Spotify asked spotimy to wait until today at .+\. What it found so far is kept\.$/u,
-    );
-  });
-
   it("sums up what an apply did", () => {
     expect(appliedLine(last(null), now)).toBeUndefined();
     expect(
@@ -133,7 +101,7 @@ describe("what the page says", () => {
     expect(
       appliedLine(last(applied({ saved: 1, unfinished: true })), now),
     ).toMatch(
-      /saved 1 album\. It stopped before it was done, to stay within Spotify's limits\. Press Apply again later for the rest\.$/u,
+      /saved 1 album\. It stopped before it was done, to stay within Spotify's limits\. Press Apply plan again later for the rest\.$/u,
     );
   });
 
@@ -166,12 +134,6 @@ describe("what the page says", () => {
     );
   });
 
-  it("tells someone new what to press", () => {
-    expect(runLine(base, now)).toBe(
-      "Not checked yet. Press Check now to see what spotimy would change.",
-    );
-  });
-
   it("shows how far a run has got", () => {
     const running = (progress: Status["run"]["progress"]): Status => ({
       ...base,
@@ -196,13 +158,13 @@ describe("what the page says", () => {
       outcomeLine({ ...base, outcome: outcome("finished") }, now),
     ).toBeUndefined();
     expect(outcomeLine({ ...base, outcome: outcome("failed") }, now)).toMatch(
-      /^The last check stopped with an error today at \d\d:\d\d\. Press Check now to try again\.$/u,
+      /^The last update stopped with an error today at \d\d:\d\d\. Press Update plan to try again\.$/u,
     );
     expect(outcomeLine({ ...base, outcome: outcome("stopped") }, now)).toBe(
-      "The last check stopped before it finished. What it found is kept, so press Check now to carry on.",
+      "The last update stopped before it finished. What it found is kept, so press Update plan to carry on.",
     );
     expect(outcomeLine({ ...base, outcome: outcome("paused") }, now)).toBe(
-      "Spotify asked spotimy to wait, so the last check stopped early. What it found is kept, so press Check now to carry on.",
+      "Spotify asked spotimy to wait, so the last update stopped early. What it found is kept, so press Update plan to carry on.",
     );
     // A check is everyone's, whoever pressed it, and so is the schedule's.
     expect(
@@ -210,7 +172,7 @@ describe("what the page says", () => {
         { ...base, outcome: outcome("failed", "schedule", null) },
         now,
       ),
-    ).toMatch(/^The last check stopped with an error/u);
+    ).toMatch(/^The last update stopped with an error/u);
     // A plan made after the failure means a later run worked.
     expect(
       outcomeLine(
@@ -242,13 +204,13 @@ describe("what the page says", () => {
         now,
       );
     expect(theirs("failed")).toMatch(
-      /^Your last apply stopped with an error today at \d\d:\d\d\. What it did is kept, so press Apply these changes to try again\.$/u,
+      /^Your last apply stopped with an error today at \d\d:\d\d\. What it did is kept, so press Apply plan to try again\.$/u,
     );
     expect(theirs("stopped")).toBe(
-      "Your last apply stopped before it finished. What it did is kept, so press Apply these changes to carry on.",
+      "Your last apply stopped before it finished. What it did is kept, so press Apply plan to carry on.",
     );
     expect(theirs("paused")).toBe(
-      "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply these changes to carry on.",
+      "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply plan to carry on.",
     );
     expect(
       outcomeLine(
@@ -266,6 +228,184 @@ describe("what the page says", () => {
     );
     expect(waitingLine({ ...plan, waiting: 1 })).toBe(
       "spotimy has still to look at 1 of your playlists. It looks at more each morning, and holds back new and followed playlists until it has seen them all.",
+    );
+  });
+});
+
+describe("where things stand", () => {
+  const plan = (overrides: Partial<Plan>): Plan => ({
+    ...last(null).plan,
+    ...overrides,
+  });
+  const planned = (
+    overrides: Partial<Plan>,
+    settings: Partial<Status["settings"]> = {},
+  ): Status => ({
+    ...base,
+    settings: { ...base.settings, ...settings },
+    last: { ...last(null), plan: plan(overrides) },
+  });
+  const save = [
+    { albumId: "A1", label: "a", from: "a", match: "tracks" as const },
+  ];
+
+  it("names the run going, and offers nothing to press", () => {
+    expect(
+      standing(
+        { ...base, run: { ...base.run, state: "running", job: "apply" } },
+        now,
+      ),
+    ).toEqual({
+      state: "applying",
+      heading: "Applying your plan…",
+      next: undefined,
+      button: undefined,
+    });
+    expect(
+      standing(
+        {
+          ...base,
+          run: {
+            ...base.run,
+            state: "running",
+            job: "check",
+            progress: { stage: "reading", done: 1, total: 2 },
+          },
+        },
+        now,
+      ),
+    ).toEqual({
+      state: "updating",
+      heading: "Updating everyone's plans…",
+      next: "Reading libraries: 1 of 2.",
+      button: undefined,
+    });
+    // The morning run updates everyone's plans too.
+    expect(
+      standing(
+        { ...base, run: { ...base.run, state: "running", job: "schedule" } },
+        now,
+      ).state,
+    ).toBe("updating");
+  });
+
+  it("waits while Spotify asked it to", () => {
+    const paused = (retryAt: string | null) =>
+      standing(
+        {
+          ...base,
+          run: { ...base.run, state: "paused", job: "check", retryAt },
+        },
+        now,
+      );
+    const until = paused("2026-10-18T15:00:00Z");
+    expect(until.state).toBe("waiting");
+    expect(until.heading).toBe("Waiting for Spotify");
+    expect(until.next).toMatch(
+      /^Spotify asked spotimy to wait until today at \d\d:\d\d\. What it found so far is kept, and you can carry on after then\.$/u,
+    );
+    expect(until.button).toBeUndefined();
+    expect(paused(null).next).toBe(
+      "Spotify asked spotimy to wait. What it found so far is kept.",
+    );
+  });
+
+  it("says a run stopped, and offers the button that carries on", () => {
+    const update = standing({ ...base, outcome: outcome("failed") }, now);
+    expect(update).toEqual({
+      state: "stopped",
+      heading: "Stopped before it finished",
+      next: outcomeLine({ ...base, outcome: outcome("failed") }, now),
+      button: "update",
+    });
+    const apply = standing(
+      {
+        ...planned({ save }),
+        outcome: outcome("stopped", "apply", "thomas"),
+      },
+      now,
+    );
+    expect(apply.state).toBe("stopped");
+    expect(apply.button).toBe("apply");
+  });
+
+  it("tells someone new what to press", () => {
+    expect(standing(base, now)).toEqual({
+      state: "no-plan",
+      heading: "No plan yet",
+      next: "Press Update plan to see what spotimy would change.",
+      button: "update",
+    });
+  });
+
+  it("offers Apply plan alone when the plan has changes", () => {
+    expect(standing(planned({ save }), now)).toEqual({
+      state: "ready",
+      heading: "Ready to apply",
+      next: "Press Apply plan to make these changes.",
+      button: "apply",
+    });
+    // Saves are ready while some playlists are still to look at.
+    expect(standing(planned({ save, waiting: 797 }), now).state).toBe("ready");
+  });
+
+  it("says the morning run applies the plan once the person has applied once", () => {
+    expect(standing(planned({ save }, { autoApply: true }), now).next).toBe(
+      "spotimy applies it each morning, or press Apply plan to apply it now.",
+    );
+    expect(
+      standing(planned({ save, first: true }, { autoApply: true }), now).next,
+    ).toBe("Press Apply plan to make these changes.");
+  });
+
+  it("says it is still looking, and offers nothing to press", () => {
+    expect(standing(planned({ waiting: 797 }), now)).toEqual({
+      state: "looking",
+      heading: "Still looking at your playlists",
+      next: "spotimy looks at more each morning and updates your plan.",
+      button: undefined,
+    });
+  });
+
+  it("says when the plan is up to date", () => {
+    expect(standing(planned({}), now)).toEqual({
+      state: "up-to-date",
+      heading: "Up to date",
+      next: "spotimy updates your plan each morning, or press Update plan to update it now.",
+      button: "update",
+    });
+  });
+});
+
+describe("what the last run did", () => {
+  it("says when the plan was updated", () => {
+    expect(lastLine(last(null), now)).toMatch(
+      /^Plan updated today at \d\d:\d\d\.$/u,
+    );
+  });
+
+  it("gives the time once when the apply updated the plan", () => {
+    const run: LastRun = {
+      ...last(applied({ saved: 326, at: "2026-10-18T05:31:40Z" })),
+      madeAt: "2026-10-18T05:31:20Z",
+    };
+    expect(lastLine(run, now)).toBe(appliedLine(run, now));
+    expect(lastLine(run, now)).toMatch(
+      /^Applied today at \d\d:\d\d: saved 326 albums\.$/u,
+    );
+  });
+
+  it("gives both when the apply came before the plan", () => {
+    expect(
+      lastLine(
+        {
+          ...last(applied({ saved: 1, at: "2026-10-17T20:20:00Z" })),
+          madeAt: "2026-10-18T05:30:00Z",
+        },
+        now,
+      ),
+    ).toMatch(
+      /^Plan updated today at \d\d:\d\d\. Applied 17 October at \d\d:\d\d: saved 1 album\.$/u,
     );
   });
 });
