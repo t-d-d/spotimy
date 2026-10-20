@@ -56,7 +56,7 @@ jobs:
           curl --fail --silent --show-error --output "$archive" \
             "https://install.serverless.com/archives/serverless-$version.tgz"
           sha256sum --check --strict <<EOF
-          b2de18a44fef8c320b7c0059aa68c8a8fb30b1a975a17ac4b528539f9366858f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
+          81f33db1c134d629e4253df6c4a9b710d6df9b90baef0bc34dfeb3f5eb07d35f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
           87eef92a242b92c44b6ac02fcc3176553c774f1340c536176a0a9d373771eb5b  $archive
           EOF
           release="$HOME/.serverless/releases/$version"
@@ -247,7 +247,7 @@ jobs:
           curl --fail --silent --show-error --output "$archive" \
             "https://install.serverless.com/archives/serverless-$version.tgz"
           sha256sum --check --strict <<EOF
-          b2de18a44fef8c320b7c0059aa68c8a8fb30b1a975a17ac4b528539f9366858f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
+          81f33db1c134d629e4253df6c4a9b710d6df9b90baef0bc34dfeb3f5eb07d35f  node_modules/serverless/node_modules/.bin/serverless-linux-amd64-0.0.2
           87eef92a242b92c44b6ac02fcc3176553c774f1340c536176a0a9d373771eb5b  $archive
           EOF
           release="$HOME/.serverless/releases/$version"
