@@ -302,7 +302,7 @@ describe("where things stand", () => {
     expect(until.state).toBe("waiting");
     expect(until.heading).toBe("Waiting for Spotify");
     expect(until.next).toMatch(
-      /^Spotify asked spotimy to wait until today at \d\d:\d\d\. What it found so far is kept, and it can carry on after then\.$/u,
+      /^Spotify asked spotimy to wait until today at \d\d:\d\d\. What it found so far is kept, and you can carry on after then\.$/u,
     );
     expect(until.button).toBeUndefined();
     expect(paused(null).next).toBe(

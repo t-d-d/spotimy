@@ -34,7 +34,7 @@ export function SignedIn({ status, show, reload }: Props) {
     } catch (error) {
       setProblem(
         error instanceof Changed
-          ? "Your plan changed while this page was open. Look it over again, then press Apply plan."
+          ? "Your plan changed while this page was open. Look it over again."
           : error instanceof Busy
             ? "A run is already going. This page updates when it finishes."
             : "That did not work. Try again in a minute.",
@@ -112,28 +112,23 @@ export function SignedIn({ status, show, reload }: Props) {
             {problem}
           </p>
         )}
-        {button === "apply" && last !== null ? (
+        {button === undefined ? null : (
           <div className={styles.buttons}>
             <button
               type="button"
               className={styles.primary}
-              onClick={() => void act(() => startApply(last.runId))}
+              onClick={() =>
+                void act(
+                  button === "apply" && last !== null
+                    ? () => startApply(last.runId)
+                    : startCheck,
+                )
+              }
             >
-              Apply plan
+              {button === "apply" ? "Apply plan" : "Update plan"}
             </button>
           </div>
-        ) : null}
-        {button === "update" ? (
-          <div className={styles.buttons}>
-            <button
-              type="button"
-              className={styles.primary}
-              onClick={() => void act(startCheck)}
-            >
-              Update plan
-            </button>
-          </div>
-        ) : null}
+        )}
       </section>
 
       {last === null ? null : <PlanView plan={last.plan} />}

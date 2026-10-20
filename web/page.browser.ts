@@ -175,8 +175,9 @@ describe("signed in", () => {
       }),
     );
     await page.getByRole("button", { name: "Apply plan" }).click();
-    expect(await page.getByRole("alert").textContent()).toContain(
-      "Your plan changed while this page was open.",
+    // The run card says what to press for the plan that replaced it.
+    expect(await page.getByRole("alert").textContent()).toBe(
+      "Your plan changed while this page was open. Look it over again.",
     );
   });
 

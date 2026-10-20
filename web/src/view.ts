@@ -100,7 +100,7 @@ export function standing(status: Status, now: Date): Standing {
       next:
         run.retryAt === null
           ? "Spotify asked spotimy to wait. What it found so far is kept."
-          : `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept, and it can carry on after then.`,
+          : `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept, and you can carry on after then.`,
       button: undefined,
     };
   }
