@@ -288,6 +288,9 @@ describe("signed in", () => {
     await page
       .getByRole("heading", { name: "Still looking at your playlists" })
       .waitFor();
+    expect(await page.getByRole("heading", { name: "Your plan" }).count()).toBe(
+      1,
+    );
     expect(await page.getByRole("button", { name: /plan$/u }).count()).toBe(0);
     expect(await page.getByText("Nothing to change").count()).toBe(0);
   });
