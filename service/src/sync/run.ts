@@ -511,7 +511,7 @@ async function planFor(
     actions.create.length +
     actions.finish.length;
   await changes.write(changes.done, total);
-  const record = async (change: Change) => {
+  const remember = async (change: Change) => {
     switch (change.kind) {
       case "saved":
         done.saved.add(change.albumId);
@@ -568,10 +568,17 @@ async function planFor(
         break;
       }
     }
+  };
+  // One write of MEMORY for everything a call to Spotify took. A write per
+  // change rewrote the same growing item fast enough for DynamoDB to
+  // throttle it (#10).
+  const record = async (taken: Change[]) => {
+    for (const change of taken) await remember(change);
     await store.putMemberState(member.id, { memory });
     // Counted once what changed is in MEMORY. A playlist counts when filled.
-    if (change.kind !== "made") {
-      changes.done += 1;
+    const counted = taken.filter((change) => change.kind !== "made").length;
+    if (counted > 0) {
+      changes.done += counted;
       await changes.write(changes.done, total);
     }
   };

@@ -130,7 +130,9 @@ export async function applyActions(config: {
   hasTime: () => boolean;
   // Whether the day's allowance of Spotify calls has room for one more.
   hasCalls: () => boolean;
-  record: (change: Change) => Promise<void>;
+  // Called once a step's changes are in Spotify: once for a batch of saves
+  // and follows, and once for each playlist made or filled.
+  record: (changes: Change[]) => Promise<void>;
   log: Logger;
 }): Promise<Outcome> {
   const { client, actions, log, userId, record, hasTime, hasCalls } = config;
@@ -198,8 +200,8 @@ export async function applyActions(config: {
       await client.put(
         `/me/library?uris=${encodeURIComponent(batch.map((entry) => entry.uri).join(","))}`,
       );
+      await record(batch.map((entry) => entry.change));
       for (const { change } of batch) {
-        await record(change);
         if (change.kind === "saved") outcome.saved += 1;
         else outcome.followed += 1;
       }
@@ -213,22 +215,24 @@ export async function applyActions(config: {
       const present = await playlistTrackUris(client, entry.playlistId);
       const missing = album.filter((uri) => !present.has(uri));
       const snapshot = await addTracks(client, entry.playlistId, missing, "");
-      await record({
-        kind: "filled",
-        playlistId: entry.playlistId,
-        verdict: filledVerdict(
-          entry.playlistId,
-          userId,
-          snapshot,
-          {
-            id: entry.albumId,
-            uri: `spotify:album:${entry.albumId}`,
-            label: entry.albumLabel,
-            tracks: album.length,
-          },
-          album.length,
-        ),
-      });
+      await record([
+        {
+          kind: "filled",
+          playlistId: entry.playlistId,
+          verdict: filledVerdict(
+            entry.playlistId,
+            userId,
+            snapshot,
+            {
+              id: entry.albumId,
+              uri: `spotify:album:${entry.albumId}`,
+              label: entry.albumLabel,
+              tracks: album.length,
+            },
+            album.length,
+          ),
+        },
+      ]);
       outcome.finished += 1;
     });
     if (!going) return outcome;
@@ -246,13 +250,15 @@ export async function applyActions(config: {
       );
       // Recorded before its tracks go in, so a half-made playlist is
       // finished later rather than left empty.
-      await record({
-        kind: "made",
-        playlistId: playlist.id,
-        albumId: album.id,
-        albumLabel: label(album),
-        name,
-      });
+      await record([
+        {
+          kind: "made",
+          playlistId: playlist.id,
+          albumId: album.id,
+          albumLabel: label(album),
+          name,
+        },
+      ]);
       const snapshot = await addTracks(
         client,
         playlist.id,
@@ -260,22 +266,24 @@ export async function applyActions(config: {
         playlist.snapshot_id,
       );
       const year = saved.added_at.slice(0, 4);
-      await record({
-        kind: "filled",
-        playlistId: playlist.id,
-        verdict: filledVerdict(
-          playlist.id,
-          userId,
-          snapshot,
-          {
-            id: album.id,
-            uri: album.uri,
-            label: label(album),
-            tracks: album.total_tracks,
-          },
-          tracks.length,
-        ),
-      });
+      await record([
+        {
+          kind: "filled",
+          playlistId: playlist.id,
+          verdict: filledVerdict(
+            playlist.id,
+            userId,
+            snapshot,
+            {
+              id: album.id,
+              uri: album.uri,
+              label: label(album),
+              tracks: album.total_tracks,
+            },
+            tracks.length,
+          ),
+        },
+      ]);
       outcome.created.push({ name, year });
     });
     if (!going) return outcome;

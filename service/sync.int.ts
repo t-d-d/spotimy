@@ -331,6 +331,29 @@ describe("an apply", () => {
     );
   });
 
+  it("writes what a batch of saves took to MEMORY once, not once per album", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    const savedCounts: number[] = [];
+    const put = store.putMemberState.bind(store);
+    const spy = vi
+      .spyOn(store, "putMemberState")
+      .mockImplementation((id, state) => {
+        if (id === thomas) savedCounts.push(state.memory.saved.length);
+        return put(id, state);
+      });
+    onTestFinished(() => {
+      spy.mockRestore();
+    });
+    const before = (await store.getMemory(thomas))?.saved.length;
+    await apply(thomas);
+    const growths = savedCounts
+      .map((count, index) => count - (savedCounts[index - 1] ?? before ?? 0))
+      .filter((growth) => growth > 0);
+    expect(growths).toEqual([4]);
+  });
+
   it("keeps showing what was applied after someone else's check", async () => {
     await setUp();
     await check();
