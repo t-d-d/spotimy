@@ -12,14 +12,7 @@ import {
 import styles from "./Page.module.css";
 import { PlanView } from "./PlanView";
 import { SettingsForm } from "./SettingsForm";
-import {
-  appliedLine,
-  byYear,
-  hasWork,
-  outcomeLine,
-  progressLine,
-  runLine,
-} from "./view";
+import { byYear, lastLine, standing } from "./view";
 
 interface Props {
   status: Status;
@@ -29,12 +22,9 @@ interface Props {
 
 export function SignedIn({ status, show, reload }: Props) {
   const [problem, setProblem] = useState<string | undefined>(undefined);
-  const { last, run } = status;
-  const idle = run.state === "idle";
+  const { last } = status;
   const now = new Date();
-  const applied = last === null ? undefined : appliedLine(last, now);
-  const progress = progressLine(status);
-  const ended = outcomeLine(status, now);
+  const { state, heading, next, button } = standing(status, now);
   const made = last?.applied?.created ?? [];
 
   const act = async (action: () => Promise<Status>) => {
@@ -44,7 +34,7 @@ export function SignedIn({ status, show, reload }: Props) {
     } catch (error) {
       setProblem(
         error instanceof Changed
-          ? "Your plan changed while this page was open. Look it over again, then press Apply."
+          ? "Your plan changed while this page was open. Look it over again, then press Apply plan."
           : error instanceof Busy
             ? "A run is already going. This page updates when it finishes."
             : "That did not work. Try again in a minute.",
@@ -92,20 +82,18 @@ export function SignedIn({ status, show, reload }: Props) {
 
       <section className={styles.card} aria-labelledby="run">
         <h2 id="run" className={styles.section}>
-          {runLine(status, now)}
+          {heading}
         </h2>
-        {progress === undefined ? null : (
-          <p className={styles.lede} role="status">
-            {progress}
+        {next === undefined ? null : (
+          <p
+            className={state === "stopped" ? styles.note : styles.lede}
+            role="status"
+          >
+            {next}
           </p>
         )}
-        {ended === undefined ? null : (
-          <p className={styles.note} role="status">
-            {ended}
-          </p>
-        )}
-        {applied === undefined ? null : (
-          <p className={styles.lede}>{applied}</p>
+        {last === null ? null : (
+          <p className={styles.history}>{lastLine(last, now)}</p>
         )}
         {made.length === 0 ? null : (
           <div className={styles.lede}>
@@ -124,26 +112,28 @@ export function SignedIn({ status, show, reload }: Props) {
             {problem}
           </p>
         )}
-        <div className={styles.buttons}>
-          <button
-            type="button"
-            className={styles.primary}
-            disabled={!idle || last === null || !hasWork(last.plan)}
-            onClick={() => {
-              if (last !== null) void act(() => startApply(last.runId));
-            }}
-          >
-            Apply these changes
-          </button>
-          <button
-            type="button"
-            className={styles.secondary}
-            disabled={!idle}
-            onClick={() => void act(startCheck)}
-          >
-            Check now
-          </button>
-        </div>
+        {button === "apply" && last !== null ? (
+          <div className={styles.buttons}>
+            <button
+              type="button"
+              className={styles.primary}
+              onClick={() => void act(() => startApply(last.runId))}
+            >
+              Apply plan
+            </button>
+          </div>
+        ) : null}
+        {button === "update" ? (
+          <div className={styles.buttons}>
+            <button
+              type="button"
+              className={styles.primary}
+              onClick={() => void act(startCheck)}
+            >
+              Update plan
+            </button>
+          </div>
+        ) : null}
       </section>
 
       {last === null ? null : <PlanView plan={last.plan} />}

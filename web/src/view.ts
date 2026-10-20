@@ -14,22 +14,6 @@ const time = (iso: string, now: Date): string => {
     : `${at.toLocaleDateString("en-GB", { day: "numeric", month: "long" })} at ${clock}`;
 };
 
-export function runLine(status: Status, now: Date): string {
-  const { run, last } = status;
-  if (run.state === "running") {
-    return run.job === "apply"
-      ? "Applying your changes…"
-      : "Checking everyone's libraries…";
-  }
-  if (run.state === "paused" && run.retryAt !== null) {
-    return `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept.`;
-  }
-  if (last === null) {
-    return "Not checked yet. Press Check now to see what spotimy would change.";
-  }
-  return `Last checked ${time(last.madeAt, now)}.`;
-}
-
 const counted = (count: number) => count.toLocaleString("en-GB");
 
 // How far the run in progress has got.
@@ -56,21 +40,115 @@ export function outcomeLine(status: Status, now: Date): string | undefined {
     if (outcome.requestedBy !== user.id) return undefined;
     switch (outcome.result) {
       case "failed":
-        return `Your last apply stopped with an error ${time(outcome.finishedAt, now)}. What it did is kept, so press Apply these changes to try again.`;
+        return `Your last apply stopped with an error ${time(outcome.finishedAt, now)}. What it did is kept, so press Apply plan to try again.`;
       case "stopped":
-        return "Your last apply stopped before it finished. What it did is kept, so press Apply these changes to carry on.";
+        return "Your last apply stopped before it finished. What it did is kept, so press Apply plan to carry on.";
       case "paused":
-        return "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply these changes to carry on.";
+        return "Spotify asked spotimy to wait, so your last apply stopped early. What it did is kept, so press Apply plan to carry on.";
     }
   }
   switch (outcome.result) {
     case "failed":
-      return `The last check stopped with an error ${time(outcome.finishedAt, now)}. Press Check now to try again.`;
+      return `The last update stopped with an error ${time(outcome.finishedAt, now)}. Press Update plan to try again.`;
     case "stopped":
-      return "The last check stopped before it finished. What it found is kept, so press Check now to carry on.";
+      return "The last update stopped before it finished. What it found is kept, so press Update plan to carry on.";
     case "paused":
-      return "Spotify asked spotimy to wait, so the last check stopped early. What it found is kept, so press Check now to carry on.";
+      return "Spotify asked spotimy to wait, so the last update stopped early. What it found is kept, so press Update plan to carry on.";
   }
+}
+
+// Where things stand for the person: one state, what happens next, and the
+// one button that moves it on, if any. The first state that matches wins.
+export type State =
+  | "updating"
+  | "applying"
+  | "waiting"
+  | "stopped"
+  | "no-plan"
+  | "ready"
+  | "looking"
+  | "up-to-date";
+
+export interface Standing {
+  state: State;
+  heading: string;
+  next: string | undefined;
+  button: "update" | "apply" | undefined;
+}
+
+export function standing(status: Status, now: Date): Standing {
+  const { run, last, outcome, settings } = status;
+  if (run.state === "running") {
+    return run.job === "apply"
+      ? {
+          state: "applying",
+          heading: "Applying your plan…",
+          next: progressLine(status),
+          button: undefined,
+        }
+      : {
+          state: "updating",
+          heading: "Updating everyone's plans…",
+          next: progressLine(status),
+          button: undefined,
+        };
+  }
+  if (run.state === "paused") {
+    return {
+      state: "waiting",
+      heading: "Waiting for Spotify",
+      next:
+        run.retryAt === null
+          ? "Spotify asked spotimy to wait. What it found so far is kept."
+          : `Spotify asked spotimy to wait until ${time(run.retryAt, now)}. What it found so far is kept, and it can carry on after then.`,
+      button: undefined,
+    };
+  }
+  const stopped = outcomeLine(status, now);
+  if (stopped !== undefined) {
+    return {
+      state: "stopped",
+      heading: "Stopped before it finished",
+      next: stopped,
+      button: outcome?.job === "apply" && last !== null ? "apply" : "update",
+    };
+  }
+  if (last === null) {
+    return {
+      state: "no-plan",
+      heading: "No plan yet",
+      next: "Press Update plan to see what spotimy would change.",
+      button: "update",
+    };
+  }
+  if (hasWork(last.plan)) {
+    return {
+      state: "ready",
+      heading: "Ready to apply",
+      // The morning run applies only for someone who applied once.
+      next:
+        settings.autoApply && !last.plan.first
+          ? "spotimy applies it each morning, or press Apply plan to apply it now."
+          : "Press Apply plan to make these changes.",
+      button: "apply",
+    };
+  }
+  // An update looks at no more playlists until the day's allowance renews,
+  // so there is nothing to press.
+  if (last.plan.waiting > 0) {
+    return {
+      state: "looking",
+      heading: "Still looking at your playlists",
+      next: "spotimy looks at more each morning and updates your plan.",
+      button: undefined,
+    };
+  }
+  return {
+    state: "up-to-date",
+    heading: "Up to date",
+    next: "spotimy updates your plan each morning, or press Update plan to update it now.",
+    button: "update",
+  };
 }
 
 export const hasWork = (plan: Plan): boolean =>
@@ -107,9 +185,21 @@ export function appliedLine(last: LastRun, now: Date): string | undefined {
       ? ` ${plural(applied.failed, "change", "changes")} failed. They are in the plan again.`
       : "";
   const unfinished = applied.unfinished
-    ? " It stopped before it was done, to stay within Spotify's limits. Press Apply again later for the rest."
+    ? " It stopped before it was done, to stay within Spotify's limits. Press Apply plan again later for the rest."
     : "";
   return `Applied ${time(applied.at, now)}: ${done}.${failed}${unfinished}`;
+}
+
+// When the plan was made, and what the last apply did. An apply updates the
+// plan too, so when both read the same time they are one run, told once.
+export function lastLine(last: LastRun, now: Date): string {
+  const updated = time(last.madeAt, now);
+  const applied = appliedLine(last, now);
+  if (last.applied === null || applied === undefined)
+    return `Plan updated ${updated}.`;
+  return time(last.applied.at, now) === updated
+    ? applied
+    : `Plan updated ${updated}. ${applied}`;
 }
 
 // The person's playlists still to look at, within the day's allowance.

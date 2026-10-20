@@ -109,7 +109,7 @@ describe("signed out", () => {
 });
 
 describe("signed in", () => {
-  it("shows the plan, and says nothing changes until Apply", async () => {
+  it("shows the plan, and says nothing changes until Apply plan", async () => {
     const { page } = await openPage(
       "/",
       answering({ "GET /api/status": () => ({ status: 200, body: status() }) }),
@@ -126,7 +126,9 @@ describe("signed in", () => {
     ).toBe(1);
     expect(
       await page
-        .getByText("Nothing changes in your library until you press Apply.")
+        .getByText(
+          "Nothing changes in your library until you press Apply plan.",
+        )
         .count(),
     ).toBe(1);
   });
@@ -150,15 +152,18 @@ describe("signed in", () => {
         }),
       }),
     );
-    await page.getByRole("button", { name: "Apply these changes" }).click();
-    await page.getByText("Applying your changes…").waitFor();
+    // The plan has changes, so Apply plan is the only button.
+    expect(
+      await page.getByRole("button", { name: "Update plan" }).count(),
+    ).toBe(0);
+    await page.getByRole("button", { name: "Apply plan" }).click();
+    await page.getByText("Applying your plan…").waitFor();
     // It names the plan on show, so only what the person saw is applied.
     expect(calls.find((call) => call.path === "/api/apply")?.body).toEqual({
       plan: "run00000001",
     });
-    expect(
-      await page.getByRole("button", { name: "Check now" }).isDisabled(),
-    ).toBe(true);
+    // Nothing to press while the run goes.
+    expect(await page.getByRole("button", { name: /plan$/u }).count()).toBe(0);
   });
 
   it("says so when the plan changed while the page was open", async () => {
@@ -169,7 +174,7 @@ describe("signed in", () => {
         "POST /api/apply": () => ({ status: 409, body: { error: "changed" } }),
       }),
     );
-    await page.getByRole("button", { name: "Apply these changes" }).click();
+    await page.getByRole("button", { name: "Apply plan" }).click();
     expect(await page.getByRole("alert").textContent()).toContain(
       "Your plan changed while this page was open.",
     );
@@ -201,9 +206,9 @@ describe("signed in", () => {
         },
       }),
     );
-    await page.getByText("Checking everyone's libraries…").waitFor();
+    await page.getByText("Updating everyone's plans…").waitFor();
     await page
-      .getByText(/^Last checked today at/u)
+      .getByText(/^Plan updated today at/u)
       .waitFor({ timeout: 10_000 });
   });
 
@@ -238,7 +243,7 @@ describe("signed in", () => {
       });
   });
 
-  it("does not offer Apply when there is nothing to change", async () => {
+  it("offers only Update plan when the plan is up to date", async () => {
     const quiet = status();
     if (quiet.last !== null) {
       quiet.last.plan = {
@@ -253,12 +258,37 @@ describe("signed in", () => {
       "/",
       answering({ "GET /api/status": () => ({ status: 200, body: quiet }) }),
     );
+    await page.getByRole("heading", { name: "Up to date" }).waitFor();
+    expect(await page.getByRole("button", { name: "Apply plan" }).count()).toBe(
+      0,
+    );
     expect(
-      await page
-        .getByRole("button", { name: "Apply these changes" })
-        .isDisabled(),
-    ).toBe(true);
+      await page.getByRole("button", { name: "Update plan" }).count(),
+    ).toBe(1);
     expect(await page.getByText("Nothing to change").count()).toBe(1);
+  });
+
+  it("reads as still looking while playlists are unseen, with nothing to press", async () => {
+    const looking = status();
+    if (looking.last !== null) {
+      looking.last.plan = {
+        ...looking.last.plan,
+        save: [],
+        follow: [],
+        create: [],
+        finish: [],
+        waiting: 797,
+      };
+    }
+    const { page } = await openPage(
+      "/",
+      answering({ "GET /api/status": () => ({ status: 200, body: looking }) }),
+    );
+    await page
+      .getByRole("heading", { name: "Still looking at your playlists" })
+      .waitFor();
+    expect(await page.getByRole("button", { name: /plan$/u }).count()).toBe(0);
+    expect(await page.getByText("Nothing to change").count()).toBe(0);
   });
 
   it("shows how far a run has got, and says when one failed", async () => {

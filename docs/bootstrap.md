@@ -41,7 +41,7 @@ In the Actions tab, re-run the failed deploy run on main. The run's summary give
 
 1. In the Spotify app's settings, replace the redirect URI with the one the deploy gave: the page's address followed by `/api/callback`.
 2. Confirm the alert email. The first deploy makes the alert topic, and AWS emails a link from `no-reply@sns.amazonaws.com`. No alarm reaches anyone until it is clicked, and it lasts three days.
-3. Open the page and sign in. Then each other person signs in. Nothing changes in anyone's library until they press Apply.
+3. Open the page and sign in. Then each other person signs in. Nothing changes in anyone's library until they press Apply plan.
 
 To check that an alarm reaches you, run this in CloudShell in `us-east-1`:
 

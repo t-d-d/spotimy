@@ -14,12 +14,15 @@ export function PlanView({ plan }: { plan: Plan }) {
   return (
     <section className={styles.card} aria-labelledby="plan">
       <h2 id="plan" className={styles.section}>
-        {hasWork(plan) ? "What applying would change" : "Nothing to change"}
+        Your plan
       </h2>
       {waiting === undefined ? null : <p className={styles.note}>{waiting}</p>}
+      {waiting === undefined && !hasWork(plan) ? (
+        <p className={styles.lede}>Nothing to change.</p>
+      ) : null}
       {plan.first && hasWork(plan) ? (
         <p className={styles.note}>
-          Nothing changes in your library until you press Apply.
+          Nothing changes in your library until you press Apply plan.
         </p>
       ) : null}
 
