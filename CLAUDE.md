@@ -51,10 +51,11 @@ spotimy keeps a small group's Spotify libraries in step: every album playlist be
 - Given an issue number, run the `fetch-ticket` skill first.
 - Labels are written with a space after the colon: `type: enhancement`, `type: nfr`, `type: chore`, `type: qa` or `type: bug`, and `mode: afk` or `mode: human`.
 - Blockers are listed on a `Blocked by:` line at the top of the issue body. Do not start an issue whose blocker is open.
-- An afk issue goes from its text to a pull request without stopping to ask.
+- An afk issue is picked up as soon as it has the label, and goes from its text to a pull request without stopping to ask.
 - Anything only the owner can do is not yours: a dashboard setting, a secret, a Spotify account. Say what is needed and stop.
 - When you stop with nobody watching, say why in a comment on the issue.
 - Acceptance criteria are not yours to rewrite. If one cannot be met as written, say so under Drift in the pull request.
+- When your pull request has merged or closed, or you are done and have none, make the last line of your reply `Signing off.` or `Signing off: <reason>`. That archives the session. Do not sign off while the owner is working with you.
 
 ## GitHub from a cloud session
 
