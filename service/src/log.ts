@@ -42,6 +42,9 @@ export const events = [
   // How far a run has got, or how it ended, could not be saved for the page.
   "progress-unwritten",
   "outcome-unwritten",
+  // What a filled playlist was found to be could not be saved. The next run
+  // reads the playlist again.
+  "verdict-unwritten",
 ] as const;
 
 export type Event = (typeof events)[number];

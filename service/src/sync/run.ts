@@ -546,7 +546,12 @@ async function planFor(
           (entry) => entry.playlistId !== change.playlistId,
         );
         verdicts.set(change.playlistId, change.verdict);
-        await store.putVerdicts([change.verdict]);
+        // Spotify has the tracks already, so the playlist is still filled.
+        try {
+          await store.putVerdicts([change.verdict]);
+        } catch (error) {
+          log.warn("verdict-unwritten", { ...fields, ...errorFields(error) });
+        }
         const { albumId, albumLabel } = change.verdict;
         const made = albumId === null ? undefined : done.made.get(albumId);
         // Later members in this run follow it rather than making their own.
