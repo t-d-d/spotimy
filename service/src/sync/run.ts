@@ -571,10 +571,15 @@ async function planFor(
   };
   // One write of MEMORY for everything a call to Spotify took. A write per
   // change rewrote the same growing item fast enough for DynamoDB to
-  // throttle it (#10).
+  // throttle it (#10). A failed write is logged, not thrown: Spotify took
+  // these changes, and the run's next write of MEMORY keeps them (#11).
   const record = async (taken: Change[]) => {
     for (const change of taken) await remember(change);
-    await store.putMemberState(member.id, { memory });
+    try {
+      await store.putMemberState(member.id, { memory });
+    } catch (error) {
+      log.warn("memory-unwritten", { ...fields, ...errorFields(error) });
+    }
     // Counted once what changed is in MEMORY. A playlist counts when filled.
     const counted = taken.filter((change) => change.kind !== "made").length;
     if (counted > 0) {
