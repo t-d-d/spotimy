@@ -354,6 +354,89 @@ describe("an apply", () => {
     expect(growths).toEqual([4]);
   });
 
+  it("counts a batch Spotify took as done when its MEMORY write fails", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    const put = store.putMemberState.bind(store);
+    let refused = false;
+    const spy = vi
+      .spyOn(store, "putMemberState")
+      .mockImplementation((id, state) => {
+        if (id === thomas && !refused) {
+          refused = true;
+          return Promise.reject(new Error("Throttled"));
+        }
+        return put(id, state);
+      });
+    const before = (await store.getMemory(thomas))?.saved.length ?? 0;
+    const setProgress = vi.spyOn(store, "setProgress");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      spy.mockRestore();
+      setProgress.mockRestore();
+      warn.mockRestore();
+    });
+    await apply(thomas);
+    expect(refused).toBe(true);
+    expect((await lastRun(thomas)).applied).toMatchObject({
+      saved: 4,
+      followed: 1,
+      failed: 0,
+    });
+    expect((await store.getMemory(thomas))?.saved).toHaveLength(before + 4);
+    expect(setProgress.mock.calls.at(-1)?.[1]).toEqual({
+      stage: "applying",
+      done: 6,
+      total: 6,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "memory-unwritten" }),
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "apply-failed" }),
+    );
+  });
+
+  it("puts no tracks in a playlist it made until MEMORY holds it", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    const put = store.putMemberState.bind(store);
+    let refused = false;
+    const spy = vi
+      .spyOn(store, "putMemberState")
+      .mockImplementation((id, state) => {
+        if (id === thomas && !refused && state.memory.unfinished.length > 0) {
+          refused = true;
+          return Promise.reject(new Error("Throttled"));
+        }
+        return put(id, state);
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      spy.mockRestore();
+      warn.mockRestore();
+    });
+    await apply(thomas);
+    expect(refused).toBe(true);
+    const made = spotify
+      .library("thomas")
+      .playlists.find(
+        (id) =>
+          spotify.playlist(id)?.name ===
+          "Kathryn Joseph – for you who are the wronged",
+      );
+    expect(made).toBeDefined();
+    expect(spotify.playlist(made ?? "")?.tracks).toHaveLength(0);
+    expect((await lastRun(thomas)).plan.finish).toEqual([
+      {
+        playlistId: made,
+        name: "Kathryn Joseph – for you who are the wronged",
+      },
+    ]);
+  });
+
   it("keeps showing what was applied after someone else's check", async () => {
     await setUp();
     await check();
