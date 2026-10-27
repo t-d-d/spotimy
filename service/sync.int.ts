@@ -398,6 +398,45 @@ describe("an apply", () => {
     );
   });
 
+  it("puts no tracks in a playlist it made until MEMORY holds it", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    const put = store.putMemberState.bind(store);
+    let refused = false;
+    const spy = vi
+      .spyOn(store, "putMemberState")
+      .mockImplementation((id, state) => {
+        if (id === thomas && !refused && state.memory.unfinished.length > 0) {
+          refused = true;
+          return Promise.reject(new Error("Throttled"));
+        }
+        return put(id, state);
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      spy.mockRestore();
+      warn.mockRestore();
+    });
+    await apply(thomas);
+    expect(refused).toBe(true);
+    const made = spotify
+      .library("thomas")
+      .playlists.find(
+        (id) =>
+          spotify.playlist(id)?.name ===
+          "Kathryn Joseph – for you who are the wronged",
+      );
+    expect(made).toBeDefined();
+    expect(spotify.playlist(made ?? "")?.tracks).toHaveLength(0);
+    expect((await lastRun(thomas)).plan.finish).toEqual([
+      {
+        playlistId: made,
+        name: "Kathryn Joseph – for you who are the wronged",
+      },
+    ]);
+  });
+
   it("keeps showing what was applied after someone else's check", async () => {
     await setUp();
     await check();
