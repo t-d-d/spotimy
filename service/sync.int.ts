@@ -549,13 +549,16 @@ describe("limits and failures", () => {
     await check();
     const { store } = ready();
     const put = store.putVerdicts.bind(store);
-    const spy = vi
-      .spyOn(store, "putVerdicts")
-      .mockImplementation((verdicts) =>
-        verdicts.some((verdict) => verdict.ownerId === thomas)
-          ? Promise.reject(new Error("ProvisionedThroughputExceededException"))
-          : put(verdicts),
-      );
+    // Only the write for the playlist the apply makes and fills fails.
+    const spy = vi.spyOn(store, "putVerdicts").mockImplementation((verdicts) =>
+      verdicts.some((verdict) => verdict.albumId === "Kath")
+        ? Promise.reject(
+            Object.assign(new Error("Rate of requests exceeds capacity"), {
+              name: "ProvisionedThroughputExceededException",
+            }),
+          )
+        : put(verdicts),
+    );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     onTestFinished(() => {
       spy.mockRestore();
@@ -571,7 +574,11 @@ describe("limits and failures", () => {
     const progress = (await store.getRun())?.progress;
     expect(progress?.done).toBe(progress?.total);
     expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "verdict-unwritten", userId: thomas }),
+      expect.objectContaining({
+        event: "verdict-unwritten",
+        userId: thomas,
+        errorClass: "ProvisionedThroughputExceededException",
+      }),
     );
     expect(warn).not.toHaveBeenCalledWith(
       expect.objectContaining({ event: "apply-failed" }),
