@@ -38,21 +38,21 @@ describe("fitness: one pinned Serverless version (repo-and-delivery.md)", () => 
   });
 });
 
-describe("fitness: the deploy and the rollback check the same Serverless sums (repo-and-delivery.md)", () => {
+describe("fitness: the deploy and the rollback run the same Serverless check (repo-and-delivery.md)", () => {
   // The rollback repeats the deploy's check. A copy left behind fails only
   // when a rollback runs, during an incident.
-  const pinnedSums = (job: string): string[] => {
-    const step = readWorkflow(deployPath).jobs[job]?.steps?.find(
+  const check = (job: string): string =>
+    readWorkflow(deployPath).jobs[job]?.steps?.find(
       ({ id }) => id === "serverless",
-    );
-    return [
-      ...(step?.run ?? "").matchAll(/^\s*([\da-f]{64}) {2}(\S+)$/gmu),
-    ].map(([, sum, file]) => `${sum ?? ""} ${file ?? ""}`);
-  };
+    )?.run ?? "";
 
-  it("pins the launcher's and the framework's sums once, in both jobs alike", () => {
-    const deploy = pinnedSums("deploy");
-    expect(deploy).toHaveLength(2);
-    expect(pinnedSums("rollback")).toEqual(deploy);
+  it("pins the launcher's and the framework's sums once, and the rollback repeats the step exactly", () => {
+    const deploy = check("deploy");
+    const files = [...deploy.matchAll(/^[ \t]*[\da-f]{64} {2}(\S+)$/gmu)].map(
+      ([, file]) => file,
+    );
+    expect(new Set(files).size).toBe(2);
+    expect(files).toHaveLength(2);
+    expect(check("rollback")).toBe(deploy);
   });
 });
