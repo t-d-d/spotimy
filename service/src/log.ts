@@ -45,6 +45,9 @@ export const events = [
   // What Spotify took could not be saved to MEMORY straight away. The next
   // write of MEMORY in the run keeps it.
   "memory-unwritten",
+  // What a filled playlist was found to be could not be saved. The next run
+  // reads the playlist again.
+  "verdict-unwritten",
 ] as const;
 
 export type Event = (typeof events)[number];

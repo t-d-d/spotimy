@@ -627,6 +627,55 @@ describe("limits and failures", () => {
     expect((await lastRun(thomas)).plan.finish).toEqual([]);
   });
 
+  it("counts a filled playlist as made when what it was found to be cannot be saved", async () => {
+    await setUp();
+    await check();
+    const { store } = ready();
+    const put = store.putVerdicts.bind(store);
+    // Only the write for the playlist the apply makes and fills fails.
+    const spy = vi.spyOn(store, "putVerdicts").mockImplementation((verdicts) =>
+      verdicts.some((verdict) => verdict.albumId === "Kath")
+        ? Promise.reject(
+            Object.assign(new Error("Rate of requests exceeds capacity"), {
+              name: "ProvisionedThroughputExceededException",
+            }),
+          )
+        : put(verdicts),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    onTestFinished(() => {
+      spy.mockRestore();
+      warn.mockRestore();
+    });
+    await apply(thomas);
+
+    const after = await lastRun(thomas);
+    expect(after.applied).toMatchObject({ failed: 0, unfinished: false });
+    expect(after.applied?.created).toEqual([
+      { name: "Kathryn Joseph – for you who are the wronged", year: "2025" },
+    ]);
+    const progress = (await store.getRun())?.progress;
+    expect(progress?.done).toBe(progress?.total);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "verdict-unwritten",
+        userId: thomas,
+        errorClass: "ProvisionedThroughputExceededException",
+      }),
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "apply-failed" }),
+    );
+
+    // The next run reads the playlist again and offers it to the group.
+    spy.mockRestore();
+    await check();
+    expect((await lastRun(thomas)).plan.finish).toEqual([]);
+    expect(
+      (await lastRun(matt)).plan.follow.map((entry) => entry.name),
+    ).toContain("Kathryn Joseph – for you who are the wronged");
+  });
+
   it("skips a member whose Spotify access is gone, and plans for the rest", async () => {
     await setUp();
     const { store } = ready();
