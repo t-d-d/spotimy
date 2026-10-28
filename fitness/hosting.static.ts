@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readRepoFile } from "../test/repo.ts";
+import { deployPath, readRepoFile, readWorkflow } from "../test/repo.ts";
 import { serverless } from "./serverless.ts";
 
 describe("fitness: syncing runs in the worker, once per start (hosting.md)", () => {
@@ -35,5 +35,24 @@ describe("fitness: one pinned Serverless version (repo-and-delivery.md)", () => 
     );
     expect(pinned.length).toBeGreaterThan(0);
     expect(new Set(pinned)).toEqual(new Set([version]));
+  });
+});
+
+describe("fitness: the deploy and the rollback run the same Serverless check (repo-and-delivery.md)", () => {
+  // The rollback repeats the deploy's check. A copy left behind fails only
+  // when a rollback runs, during an incident.
+  const check = (job: string): string =>
+    readWorkflow(deployPath).jobs[job]?.steps?.find(
+      ({ id }) => id === "serverless",
+    )?.run ?? "";
+
+  it("pins the launcher's and the framework's sums once, and the rollback repeats the step exactly", () => {
+    const deploy = check("deploy");
+    const files = [...deploy.matchAll(/^[ \t]*[\da-f]{64} {2}(\S+)$/gmu)].map(
+      ([, file]) => file,
+    );
+    expect(new Set(files).size).toBe(2);
+    expect(files).toHaveLength(2);
+    expect(check("rollback")).toBe(deploy);
   });
 });
